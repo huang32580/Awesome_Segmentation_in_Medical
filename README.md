@@ -77,7 +77,7 @@ Awesome-BUS-Benchmark is engineered to solve these problems. We provide a standa
 | **BUSI** | [Dataset of Breast Ultrasound Images \- Al-Dhabyani et al.](https://www.sciencedirect.com/science/article/pii/S2352340919312181?via%3Dihub) | [Download Data]([https://scholar.cu.edu.eg/?q=afahmy/pages/dataset](https://www.kaggle.com/datasets/sabahesaraki/breast-ultrasound-images-dataset?resource=download)) |
 | **BUSBRA** | [Breast Ultrasound Bi-Rads Classification... \- Ribeiro et al.](https://pubmed.ncbi.nlm.nih.gov/37937827/) | [Download Data](https://zenodo.org/records/8231412) |
 | **BUS-UC** | [Breast Ultrasound Cancer Image Classification \- Garodia et al.](https://www.sciencedirect.com/science/article/pii/S0952197623014768?via%3Dihub) | [Download Data](https://data.mendeley.com/datasets/3ksd7w7jkx/1) |
-| **BUS-UCLM** | [BUS-UCLM: Breast ultrasound lesion segmentation dataset. \- Noelia Vallez et al.,2025](https://www.nature.com/articles/s41597-025-04562-3) | [Download Data](https://github.com/noeliavallez/BUS-UCLM-Dataset) |
+| **BUS-UCLM** | [BUS-UCLM: Breast ultrasound lesion segmentation dataset. \- Noelia Vallez et al.,2025](https://www.nature.com/articles/s41597-025-04562-3) | [Download Data](https://data.mendeley.com/datasets/7fvgj4jsp7/1) |
 | **Yap2018** | [Breast ultrasound lesions recognition: a preliminary study... \- Yap et al.](https://pubmed.ncbi.nlm.nih.gov/28796627/) | [Download Data](https://www2.docm.mmu.ac.uk/STAFF/m.yap/files/BUS_ReleaseAgreement.pdf) |
 
   
