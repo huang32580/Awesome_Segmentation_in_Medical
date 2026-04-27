@@ -1,0 +1,12 @@
+MODEL:
+  TYPE: jepa_upernet
+  NAME: jepa_vit_small_patch16_224
+  JEPA:
+    MODEL_NAME: vit_small
+    PATCH_SIZE: 16
+    EMBED_DIM: 384
+    OUT_INDICES: [3, 5, 7, 11]
+  UPERNET:
+    POOL_SCALES: [1, 2, 3, 6]
+DATA:
+  IMG_SIZE: 224

@@ -11,11 +11,12 @@
   },
 
   "data": {
-    "datasets": ["busi"],
+    "datasets": ["MyData"],
     "force_prepare": false,
     "target_size": 224,
     "batch_size": 16,
-    "num_workers": 8
+    "num_workers": 8,
+    "use_pad": false
   },
 
   "optimizer": {
@@ -46,14 +47,14 @@
   "trainer": {
     "epochs": 800,
     "k_folds": 5,
-    "checkpoint_dir": "checkpoints/",
+    "checkpoint_dir": "checkpoints_debug_1/",
     "early_stopping_patience": 80,
     "freeze_mode": "none"
   },
 
   "wandb": {
     "project": "Breast-US-Segmentation",
-    "disable": false
+    "disable": true
   },
   
   "system": {
@@ -68,5 +69,15 @@
     "cfg": "./src/models/ViT_based/swinUnet/configs/swin_tiny_patch4_window7_224_lite.yaml",
     "opts": null,
     "PRETRAIN_CKPT": "./pretrained_models/swin_tiny_patch4_window7_224.pth"
+  },
+
+  "jepa_args": {
+    "cfg": "./src/models/ViT_based/jepa_upernet/configs/jepa_vits16_224.yaml",
+    "PRETRAIN_CKPT": "./pretrained_models/jepa_BUS-ep300.pth.tar"
+  },
+
+  "usfm_args": {
+    "cfg": "./src/models/ViT_based/jepa_upernet/configs/usfm_vitb16_224.yaml",
+    "PRETRAIN_CKPT": "./pretrained_models/USFM_latest.pth"
   }
 }

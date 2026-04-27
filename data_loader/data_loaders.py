@@ -49,11 +49,14 @@ class BUSImageDataset(Dataset):
             "label": torch.tensor(label, dtype=torch.long),
         }
 
+
 class BUSDataLoader(DataLoader):
     """PyTorch DataLoader Factory for Breast US images."""
+
     def __init__(
-        self, df, batch_size, split='1', is_test=False, num_workers=0, 
-        label_map=None, target_size=512, padding_color=0, augment=True
+            self, df, batch_size, split='1', is_test=False, num_workers=0,
+            # === 增加 use_pad 参数，默认保持原来的 True 行为 ===
+            label_map=None, target_size=512, padding_color=0, augment=True, use_pad=True
     ):
         # Handle test mode automatically
         if is_test:
@@ -62,12 +65,12 @@ class BUSDataLoader(DataLoader):
         else:
             shuffle = True
 
-        # Simplified transform composition
-        transforms_list = [get_preprocessing_transform(target_size, padding_color)]
+        # === 将 use_pad 参数传递给 get_preprocessing_transform ===
+        transforms_list = [get_preprocessing_transform(target_size, padding_color, use_pad=use_pad)]
+
         if augment:
             transforms_list.append(get_augmentation_transform())
         transform = Compose(transforms_list, additional_targets={'mask': 'mask'})
-        
         # Filter dataframe for the specified split
         if not is_test:
             # In k-fold, the train split contains all data EXCEPT the current validation fold and the test set

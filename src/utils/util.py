@@ -52,8 +52,9 @@ class MetricTracker:
         self.reset()
 
     def reset(self):
+        # 修复 Pandas read-only 报错
         for col in self._data.columns:
-            self._data[col].values[:] = 0
+            self._data[col] = 0.0
 
     def update(self, key, value, n=1):
         if self.writer is not None:

@@ -35,7 +35,8 @@ def main(config):
     loader_args = {
         'batch_size': config['data']['batch_size'],
         'num_workers': config['data']['num_workers'],
-        'target_size': config['data']['target_size']
+        'target_size': config['data']['target_size'],
+        'use_pad': data_config.get('use_pad', True)
     }
     
     test_loader = BUSDataLoader(df, **loader_args, split='test', is_test=True)
@@ -45,7 +46,7 @@ def main(config):
     model_type = config['arch']['type']
     if hasattr(cnn_models, model_type):
         model = config.init_obj('arch', cnn_models)
-    elif model_type in ["TransUnet", "SwinUnet", "MedT"]:
+    elif model_type in ["TransUnet", "SwinUnet", "MedT", "JEPA_UPerNet"]:
         model = transformer_models.get_transformer_based_model(
             model_name=model_type,
             config=config.config,

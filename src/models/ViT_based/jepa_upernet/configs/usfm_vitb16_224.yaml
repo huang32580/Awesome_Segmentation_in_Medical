@@ -1,0 +1,15 @@
+MODEL:
+  TYPE: usfm_upernet
+  NAME: usfm_vit_base_patch16_224
+  USFM:
+    MODEL_NAME: vit_base
+    PATCH_SIZE: 16
+    EMBED_DIM: 768
+    OUT_INDICES: [3, 5, 7, 11]
+    MODE: "local"
+    LAYER_DECAY: 0.65
+    AUX_WEIGHT: 0.4
+  UPERNET:
+    POOL_SCALES: [1, 2, 3, 6]
+DATA:
+  IMG_SIZE: 224

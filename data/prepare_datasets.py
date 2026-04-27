@@ -56,6 +56,14 @@ class PrepareDataset:
                 ),
                 "reader": self.read_data_BUSBRA,
                 "out_prefix": "busbra"
+            },
+            "MyData": {
+                "args": (
+                    self.project_root / "datasets/MyData/images",
+                    self.project_root / "datasets/MyData/masks"
+                ),
+                "reader": self.read_data_MyData,
+                "out_prefix": "mydata"
             }
         }
         
@@ -73,6 +81,53 @@ class PrepareDataset:
         Image.fromarray(mask_white).save(save_path)
     
     # --- Readers for each dataset ---
+    def read_data_MyData(self, dataset_name, image_dir, mask_dir):
+        data = []
+        phases = ["pre_chemo", "mid_chemo"]
+
+        # 增加极其关键的调试打印
+        print(f"  -> [Debug] 开始扫描目录...")
+        print(f"  -> [Debug] 期待的图片路径: {image_dir}")
+        print(f"  -> [Debug] 期待的掩膜路径: {mask_dir}")
+
+        for phase in phases:
+            img_phase_dir = Path(image_dir) / phase
+            mask_phase_dir = Path(mask_dir) / phase
+
+            if not img_phase_dir.exists():
+                print(f"  -> [Debug] ❌ 找不到子文件夹: {img_phase_dir}")
+                continue
+
+            # 搜索 png 文件
+            png_files = list(img_phase_dir.glob("*.png"))
+            print(f"  -> [Debug] 在 {phase} 阶段找到了 {len(png_files)} 张 .png 图片")
+
+            for img_path in png_files:
+                mask_path = mask_phase_dir / img_path.name
+                if not mask_path.exists():
+                    print(f"  -> [Debug] ⚠️ 找不到对应的掩膜文件: {mask_path}")
+                    continue
+
+                with Image.open(img_path) as im:
+                    width, height = im.size
+
+                data.append({
+                    "dataset": dataset_name,
+                    "label": "malignant",
+                    "width": width,
+                    "height": height,
+                    "image_path": str(img_path),
+                    "mask_path": str(mask_path),
+                    "metadata": {"phase": phase}
+                })
+
+        df = pd.DataFrame(data)
+        if df.empty:
+            print("  -> [Error] 🚨 致命错误：配对成功的图片和掩膜数量为 0！无法生成 CSV。")
+        else:
+            print(f"  -> [Success] 成功配对了 {len(df)} 组数据！即将生成 CSV...")
+
+        return df
 
     def read_data_BUSI(self, dataset_name, root_dir):
         # Reads BUSI dataset, merging multiple masks into one.
