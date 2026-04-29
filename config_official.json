@@ -1,5 +1,5 @@
 {
-  "name": "BUS_Segmentation_Experiment",
+  "name": "BUS_USFM_Official_Experiment",
   "n_gpu": 1,
   "arch": {
     "type": "USFM_SegmentationModel",
@@ -17,31 +17,29 @@
     "use_pad": false
   },
   "optimizer": {
-    "type": "AdamW",
-    "args": {
-      "lr": 0.0001,
-      "weight_decay": 1e-5
-    }
+    "note": "在 official 模式下，本节点会被忽略，将读取 usfm_args 中的优化参数"
   },
   "loss": {
-    "type": "DiceBCELoss",
-    "args": {}
+    "type": "ATMLoss",
+    "args": {
+      "num_classes": 1,
+      "dec_layers": 3,
+      "mask_weight": 20.0,
+      "dice_weight": 1.0,
+      "cls_weight": 1.0
+    }
   },
   "metrics": [
     "pixel_accuracy", "dice_score", "hd95_batch", "iou_score"
   ],
   "lr_scheduler": {
-    "type": "CosineAnnealingLR",
-    "args": {
-      "T_max": 800,
-      "eta_min": 1e-5
-    }
+    "note": "在 official 模式下，本节点会被忽略，采用带 Warmup 的官方 timm 调度器"
   },
   "trainer": {
-    "epochs": 800,
+    "epochs": 400,
     "k_folds": 5,
-    "checkpoint_dir": "checkpoints_debug_1/",
-    "early_stopping_patience": 80,
+    "checkpoint_dir": "checkpoints_official/",
+    "early_stopping_patience": 50,
     "freeze_mode": "none"
   },
   "wandb": {
@@ -52,13 +50,20 @@
     "seed": 42
   },
   "usfm_args": {
-    "decoder_type": "UPerHead",
+    "decoder_type": "SegViT",
     "PRETRAIN_CKPT": "./pretrained_models/USFM_latest.pth",
-    "mode": "local",
+    "mode": "official",
+    "aux_weight": 0.4,
+    "base_lr": 1e-4,
+    "warmup_lr": 5e-5,
+    "min_lr": 0.0,
+    "weight_decay": 0.05,
+    "layer_decay": 0.65,
+    "warmup_epochs": 20,
     "embed_dim": 768,
     "depth": 12,
     "num_heads": 12,
     "patch_size": 16,
-    "drop_path_rate": 0.0
+    "drop_path_rate": 0.1
   }
 }

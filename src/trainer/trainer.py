@@ -35,151 +35,179 @@ class Trainer:
         self.checkpoint_dir = Path(config.get('checkpoint_dir', 'checkpoints'))
         self.checkpoint_dir.mkdir(exist_ok=True, parents=True)
         self.checkpoint_name = config.get('checkpoint_name', 'best_model.pth')
+        self.best_val_loss = float('inf')
+        self.best_epoch_info = {}
+        self.early_stopping_patience = config.get('early_stopping_patience', 10)
+        self.epochs_without_improvement = 0
 
-        self.early_stopping_patience = config.get('early_stopping_patience', 30)
-        self.early_stopping_counter = 0
-
-        self.metric_history = []  # Store dicts of metrics for each epoch
-        self.best_epoch_info = {}  # Store info of the best epoch
-
-        if self.val_loader:
-            self.fixed_val_batch = next(iter(self.val_loader))
+        self.fixed_val_batch = next(iter(self.val_loader)) if self.val_loader else None
 
     def train(self):
-        """Full training logic with dynamic ranking and early stopping."""
+        """Full training logic."""
         for epoch in range(self.start_epoch, self.config['epochs'] + 1):
             train_log = self._train_epoch(epoch)
+            valid_log = self._valid_epoch(epoch) if self.val_loader else {}
 
-            log_dict = {'epoch': epoch, **train_log}
+            log = {'epoch': epoch, **train_log, **valid_log}
 
-            if self.val_loader:
-                val_log = self._valid_epoch(epoch)
-                log_dict.update({f'val_{k}': v for k, v in val_log.items()})
+            # Print combined log
+            print(f"\nEpoch {epoch}/{self.config['epochs']}:")
+            for key, value in log.items():
+                if key != 'epoch':
+                    print(f"    {key:15s}: {value:.4f}")
 
+            # Wandb logging
+            if wandb.run:
+                wandb.log(log)
                 self._log_validation_images(epoch)
 
-                is_new_best = self._update_and_check_best(val_log, epoch)
-
-                if is_new_best:
-                    self.early_stopping_counter = 0
+            # Checkpoint and Early Stopping Logic
+            val_loss = valid_log.get('val_loss')
+            if val_loss is not None:
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
+                    self.epochs_without_improvement = 0
+                    self.best_epoch_info = log
                     self._save_checkpoint()
+                    print(f"🌟 Saved new best model (val_loss: {val_loss:.4f})")
                 else:
-                    self.early_stopping_counter += 1
+                    self.epochs_without_improvement += 1
+                    print(f"⚠️ Early stopping counter: {self.epochs_without_improvement}/{self.early_stopping_patience}")
 
-                if self.early_stopping_counter >= self.early_stopping_patience:
-                    print(
-                        f"Validation performance did not improve for {self.early_stopping_patience} epochs. Early stopping.")
-                    print(
-                        f"Best model was from epoch {self.best_epoch_info.get('epoch', 'N/A')} with rank score {self.best_epoch_info.get('avg_rank', 'N/A'):.4f}")
+                if self.epochs_without_improvement >= self.early_stopping_patience:
+                    print(f"\n🛑 Early stopping triggered after {epoch} epochs.")
+                    print("🏆 Best Epoch Info:", self.best_epoch_info)
                     break
 
-            if wandb.run: wandb.log(log_dict, step=epoch)
-
-            formatted_log = {k: f"{v:.4f}" if isinstance(v, float) else v for k, v in log_dict.items()}
-            print(f"Epoch {epoch} Summary: {formatted_log}")
-
-    def _update_and_check_best(self, val_log, current_epoch):
-        current_metrics = {'epoch': current_epoch, **val_log}
-        self.metric_history.append(current_metrics)
-
-        history_df = pd.DataFrame(self.metric_history)
-
-        history_df['loss_rank'] = history_df['loss'].rank(ascending=True, method='dense')
-        history_df['hd95_batch_rank'] = history_df['hd95_batch'].rank(ascending=True, method='dense')
-        history_df['iou_score_rank'] = history_df['iou_score'].rank(ascending=False, method='dense')
-        history_df['dice_score_rank'] = history_df['dice_score'].rank(ascending=False, method='dense')
-
-        rank_cols = ['loss_rank', 'hd95_batch_rank', 'iou_score_rank', 'dice_score_rank']
-        history_df['avg_rank'] = history_df[rank_cols].mean(axis=1)
-
-        best_epoch_idx = history_df['avg_rank'].idxmin()
-        self.best_epoch_info = history_df.loc[best_epoch_idx].to_dict()
-
-        if self.best_epoch_info['epoch'] == current_epoch:
-            print(f"New best model found at epoch {current_epoch}!")
-            print(f"  - Avg Rank: {self.best_epoch_info['avg_rank']:.4f}")
-            print(
-                f"  - Metrics: Loss={val_log['loss']:.4f}, HD95={val_log['hd95_batch']:.4f}, IoU={val_log['iou_score']:.4f}, Dice={val_log['dice_score']:.4f}")
-            return True
-        return False
+        if wandb.run:
+            wandb.run.summary.update(self.best_epoch_info)
 
     def _train_epoch(self, epoch):
+        """Training logic for an epoch."""
         self.model.train()
         self.train_metrics.reset()
-        progress_bar = tqdm(self.train_loader, desc=f"Train Epoch {epoch}")
 
-        for batch_idx, sampled_batch in enumerate(progress_bar):
-            image, target = sampled_batch['image'].to(self.device), sampled_batch['mask'].to(self.device)
+        desc = f"[Train Epoch {epoch}]"
+        pbar = tqdm(self.train_loader, desc=desc, leave=False)
+
+        for batch_idx, data in enumerate(pbar):
+            inputs = data['image'].to(self.device)
+            targets = data['mask'].to(self.device)
 
             self.optimizer.zero_grad()
-            output = self.model(image)
+            outputs = self.model(inputs)
 
-            # ================= 新增：动态类型判断，兼容官方辅助头Loss =================
-            if isinstance(output, tuple):
-                out_main, out_aux = output
-                loss_main = self.criterion(out_main, target.float())
-                loss_aux = self.criterion(out_aux, target.float())
+            # ================= 兼容输出的分支逻辑 (字典/元组/张量) =================
+            if isinstance(outputs, dict) and "pred" in outputs:
+                # 1. SegViT (ATMHead) 分支：将大字典传给 ATMLoss
+                loss = self.criterion(outputs, targets)
+                outputs = outputs["pred"]  # 重置 outputs 为最后的语义分割图，供后续计算 metrics
 
-                # 获取配置中的辅助头权重，默认 0.4
+            elif isinstance(outputs, tuple) and len(outputs) == 2:
+                # 2. UPerHead 官方双分支
+                out_main, out_aux = outputs
+                loss_main = self.criterion(out_main, targets)
+                loss_aux = self.criterion(out_aux, targets)
                 aux_weight = self.config.get('usfm_aux_weight', 0.4)
                 loss = loss_main + aux_weight * loss_aux
+                outputs = out_main
 
-                # 计算指标只需要用主输出
-                pred_for_metrics = out_main
             else:
-                loss = self.criterion(output, target.float())
-                pred_for_metrics = output
+                # 3. 基础版 (CNNs / 单支路)
+                loss = self.criterion(outputs, targets)
             # ====================================================================
 
             loss.backward()
             self.optimizer.step()
 
-            self.train_metrics.update('loss', loss.item(), n=image.size(0))
+            # 兼容 timm 的调度器 (官方 USFM 必用)
+            if self.lr_scheduler is not None:
+                if self.config.get('is_timm_scheduler', False):
+                    self.lr_scheduler.step(epoch + batch_idx / len(self.train_loader)) # Timm 可以按步细粒度更新
 
+            self.train_metrics.update('loss', loss.item())
+
+
+            # For metrics, we detach and calculate IoU
             with torch.no_grad():
-                pred_sigmoid = torch.sigmoid(pred_for_metrics.detach())
-                iou_sum, iou_count = iou_score(pred_sigmoid, target)
-                if iou_count > 0:
-                    batch_avg = iou_sum / iou_count
-                    self.train_metrics.update('iou_score', batch_avg, n=iou_count)
+                outputs_detached = outputs.detach()
+                batch_iou = iou_score(outputs_detached, targets)
 
-            progress_bar.set_postfix(loss=loss.item(), iou=self.train_metrics.avg('iou_score'))
+                # 🚀 终极暴力转换：无论返回什么，全部压平算均值，变成纯标量 float
+                if batch_iou is not None:
+                    if isinstance(batch_iou, torch.Tensor):
+                        batch_iou = batch_iou.float().mean().item()
+                    elif isinstance(batch_iou, (np.ndarray, list, tuple)):
+                        batch_iou = float(np.mean(batch_iou))
+                    else:
+                        batch_iou = float(batch_iou)
 
-        # ================= 新增：区分原生调度器和 Timm 调度器 =================
-        if self.lr_scheduler:
-            if self.config.get('is_timm_scheduler', False):
-                self.lr_scheduler.step(epoch)  # 官方 timm 的 Warmup 调度器需要传入 epoch
-            else:
-                self.lr_scheduler.step()  # 你原来 config.json 里的调度器
-        # =================================================================
+                    self.train_metrics.update('iou_score', batch_iou)
+
+            pbar.set_postfix(**{k: f"{v:.4f}" for k, v in self.train_metrics.result().items()})
+
+        # 对于普通 PyTorch 调度器，在 epoch 结束后 step
+        if self.lr_scheduler is not None and not self.config.get('is_timm_scheduler', False):
+            self.lr_scheduler.step()
 
         return self.train_metrics.result()
 
     def _valid_epoch(self, epoch):
+        """Validate after training an epoch."""
         self.model.eval()
         self.valid_metrics.reset()
-        progress_bar = tqdm(self.val_loader, desc=f"Valid Epoch {epoch}")
+
+        desc = f"[Valid Epoch {epoch}]"
         with torch.no_grad():
-            for batch_idx, sampled_batch in enumerate(progress_bar):
-                image, target = sampled_batch['image'].to(self.device), sampled_batch['mask'].to(self.device)
+            for batch_idx, data in enumerate(tqdm(self.val_loader, desc=desc, leave=False)):
+                inputs = data['image'].to(self.device)
+                targets = data['mask'].to(self.device)
 
-                # 验证/测试模式下，我们的模型必定只返回单一结果 out_main
-                output = self.model(image)
-                loss = self.criterion(output, target.float())
-                pred_sigmoid = torch.sigmoid(output)
+                outputs = self.model(inputs)
 
-                self.valid_metrics.update('loss', loss.item(), n=image.size(0))
+                # ================= 兼容输出的分支逻辑 (验证集) =================
+                if isinstance(outputs, dict) and "pred" in outputs:
+                    loss = self.criterion(outputs, targets)
+                    outputs = outputs["pred"]
+                elif isinstance(outputs, tuple) and len(outputs) == 2:
+                    out_main, out_aux = outputs
+                    # 验证阶段我们通常只算主路 Loss
+                    loss = self.criterion(out_main, targets)
+                    outputs = out_main
+                else:
+                    loss = self.criterion(outputs, targets)
+                # ====================================================================
+
+                self.valid_metrics.update('loss', loss.item())
 
                 for met in self.metric_fns:
-                    metric_sum, metric_count = met(pred_sigmoid, target)
-                    if metric_count > 0:
-                        batch_avg = metric_sum / metric_count
-                        self.valid_metrics.update(met.__name__, batch_avg, n=metric_count)
+                    metric_value = met(outputs, targets)
 
-        return self.valid_metrics.result()
+                    if metric_value is not None:
+                        # 🚀 终极暴力转换：确保它绝对是一个 Python float 标量
+                        if isinstance(metric_value, torch.Tensor):
+                            metric_value = metric_value.float().mean().item()
+                        elif isinstance(metric_value, (np.ndarray, list, tuple)):
+                            metric_value = float(np.mean(metric_value))
+                        else:
+                            metric_value = float(metric_value)
+
+                        if not np.isnan(metric_value):
+                            self.valid_metrics.update(met.__name__, metric_value)
+
+        return {f'val_{k}': v for k, v in self.valid_metrics.result().items()}
+
+    def resume_checkpoint(self, resume_path):
+        """Resumes from a saved checkpoint."""
+        print(f"Loading checkpoint: {resume_path} ...")
+        checkpoint = torch.load(resume_path, map_location=self.device)
+        self.start_epoch = checkpoint['best_epoch_info'].get('epoch', 0) + 1
+        self.best_val_loss = checkpoint['best_epoch_info'].get('val_loss', float('inf'))
+        self.model.load_state_dict(checkpoint['state_dict'])
+        print(f"Checkpoint loaded. Resuming from epoch {self.start_epoch}.")
 
     def _save_checkpoint(self):
-        """Saves model checkpoint locally and logs it as a wandb artifact."""
+        """Saves best model locally and logs it as a wandb artifact."""
         state = {
             'arch': type(self.model).__name__,
             'state_dict': self.model.state_dict(),
@@ -201,7 +229,15 @@ class Trainer:
         gt_masks = self.fixed_val_batch['mask'].to(self.device)
 
         with torch.no_grad():
-            pred_logits = self.model(images)
+            outputs = self.model(images)
+            # 处理字典或元组以便取用于可视化的 pred_logits
+            if isinstance(outputs, dict) and "pred" in outputs:
+                pred_logits = outputs["pred"]
+            elif isinstance(outputs, tuple) and len(outputs) == 2:
+                pred_logits = outputs[0]
+            else:
+                pred_logits = outputs
+
             pred_masks = torch.sigmoid(pred_logits)
 
         images_grid = make_grid(images, normalize=True)
@@ -210,8 +246,8 @@ class Trainer:
 
         wandb.log({
             "validation_samples": [
-                wandb.Image(images_grid, caption="Input Images"),
-                wandb.Image(gt_masks_grid, caption="Ground Truth Masks"),
-                wandb.Image(pred_masks_grid, caption=f"Predicted Masks (Epoch {epoch})")
+                wandb.Image(images_grid.cpu().numpy().transpose(1, 2, 0), caption="Input Images"),
+                wandb.Image(gt_masks_grid.cpu().numpy().transpose(1, 2, 0), caption="Ground Truth"),
+                wandb.Image(pred_masks_grid.cpu().numpy().transpose(1, 2, 0), caption=f"Predictions (Epoch {epoch})")
             ]
         }, step=epoch)

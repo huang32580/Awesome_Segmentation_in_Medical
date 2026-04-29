@@ -1,144 +1,120 @@
-import argparse
+import os
 import numpy as np
 import torch
-from pathlib import Path
+import warnings
 
-# 导入各模型的实现类
-from .transUnet.transunet import TransUnet
-from .swinUnet.vision_transformer import SwinUnet
-from .swinUnet.config import get_config as get_swin_config
+# 忽略因为版本问题产生的一些无关紧要的警告
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# =========================================================================
+# 导入各个 Transformer 模型的依赖
+# =========================================================================
+from .transUnet.vit_seg_modeling import VisionTransformer as ViT_seg
+from .transUnet.vit_seg_modeling import CONFIGS as CONFIGS_ViT_seg
+from .swinUnet.vision_transformer import SwinUnet as Swin_Unet
+from .swinUnet.config import get_config
 from .medicalT.axialnet import MedT
 from .jepa_upernet.jepa_upernet import JEPA_UPerNet
-from .jepa_upernet.usfm_upernet import USFM_UPerNet
-from .jepa_upernet.config import get_config as get_jepa_config
+
+# 🚀 重点：这里改为导入我们重构好的 USFM_SegmentationModel
+from .jepa_upernet.usfm_upernet import USFM_SegmentationModel
 
 
-def _prepare_yacs_config(model_name, config_json, section_key, img_size, project_root):
+def _prepare_yacs_config(config_dict, section_key):
     """
-    内部辅助函数：统一处理 JEPA 和 USFM 的配置合并逻辑。
-    实现“单一事实来源”，让 JSON 里的 PRETRAIN_CKPT 拥有绝对优先级。
+    辅助函数：为 JEPA_UPerNet 等仍依赖 YAML/YACS 文件的旧模型解析配置。
+    (USFM 现已弃用此函数，直接读取 json dict)
     """
-    args_section = config_json.get(section_key, {})
-    relative_yaml_path = args_section.get('cfg')
+    from yacs.config import CfgNode as CN
+    import yaml
 
-    if not relative_yaml_path:
-        raise ValueError(f"模型 {model_name} 需要在 config.json 的 '{section_key}' 中指定 'cfg' 路径")
+    args = config_dict.get(section_key, {})
+    cfg_path = args.get('cfg', None)
 
-    # 1. 定位并加载 YAML 配置文件
-    absolute_yaml_path = project_root / relative_yaml_path.lstrip('./')
-    if not absolute_yaml_path.exists():
-        raise FileNotFoundError(f"找不到配置文件: {absolute_yaml_path}")
+    if not cfg_path:
+        raise ValueError(f"模型需要在 config.json 的 '{section_key}' 中指定 'cfg' 路径")
 
-    # 获取 YACS 默认配置并加载 YAML
-    yacs_config = get_jepa_config(str(absolute_yaml_path))
-    yacs_config.defrost()
+    if not os.path.exists(cfg_path):
+        raise FileNotFoundError(f"配置文件未找到: {cfg_path}")
 
-    # 2. 参数强制同步：用 JSON (主控台) 的参数覆盖 YAML
-    if img_size:
-        yacs_config.DATA.IMG_SIZE = img_size
+    with open(cfg_path, 'r', encoding='utf-8') as f:
+        yaml_cfg = yaml.load(f, Loader=yaml.FullLoader)
 
-    # 3. 权重路径唯一化：优先从 JSON 对应的 args 分支读取
-    # 如果 JSON 里设置为 null 或 "none"，则明确不加载权重
-    pretrained_path_str = args_section.get('PRETRAIN_CKPT')
-    if pretrained_path_str and str(pretrained_path_str).lower() != 'none':
-        absolute_ckpt_path = project_root / str(pretrained_path_str).lstrip('./')
-        yacs_config.MODEL.PRETRAIN_CKPT = str(absolute_ckpt_path)
-    else:
-        yacs_config.MODEL.PRETRAIN_CKPT = "none"
+    # 将 yaml 转为 yacs CfgNode
+    cfg_node = CN(yaml_cfg)
 
-    yacs_config.freeze()
-    return yacs_config
+    # 将 json 中覆盖的参数更新进去 (例如 PRETRAIN_CKPT)
+    for k, v in args.items():
+        if k != 'cfg':
+            cfg_node[k] = v
+
+    return cfg_node
 
 
-def get_transformer_based_model(model_name: str, config: dict, num_classes: int = 1):
+def get_transformer_based_model(model_name, config, num_classes=1):
     """
-    工厂函数：根据配置实例化对应的 Transformer 分割模型。
+    根据模型名称动态构建基于 Transformer 的分割模型。
+    注意：这里的 config 传入的是 config.json 解析后的完整原始字典。
     """
-    data_config = config.get('data', {})
-    img_size = data_config.get('target_size')
-    in_channels = 1  # 基础输入通道
+    img_size = config['data']['target_size']
 
-    # 定位项目根目录 (src/models/ViT_based/__init__.py 的上四级)
-    project_root = Path(__file__).parent.parent.parent.parent
+    # 1. TransUnet
+    if model_name == 'TransUnet':
+        vit_name = 'R50-ViT-B_16'
+        vit_patches_size = 16
+        vit_configs = CONFIGS_ViT_seg[vit_name]
+        vit_configs.n_classes = num_classes
+        vit_configs.split = 'train'
+        vit_configs.n_skip = 3
+        vit_configs.patches.grid = (int(img_size / vit_patches_size), int(img_size / vit_patches_size))
 
-    # ---------------------------------------------------------
-    # 1. JEPA_UPerNet 分支
-    # ---------------------------------------------------------
-    if model_name == "JEPA_UPerNet":
-        jepa_config_obj = _prepare_yacs_config(
-            model_name, config, 'jepa_args', img_size, project_root
-        )
+        model = ViT_seg(vit_configs, img_size=img_size, num_classes=num_classes)
+
+        vit_seg_args = config.get('vit_seg_args', {})
+        pretrain_path = vit_seg_args.get('vit_patches_path', None)
+        if pretrain_path and os.path.exists(pretrain_path):
+            model.load_from(weights=np.load(pretrain_path))
+        return model
+
+    # 2. SwinUnet
+    elif model_name == 'SwinUnet':
+        swin_args = config.get('swin_unet_args', {})
+        cfg_path = swin_args.get('cfg', None)
+        if not cfg_path:
+            raise ValueError("SwinUnet 需要在 'swin_unet_args' 中指定 'cfg' 路径")
+
+        import argparse
+        args = argparse.Namespace(cfg=cfg_path, opts=None, zip=False, cache_mode='part', resume=None,
+                                  accumulation_steps=None, use_checkpoint=False, amp_opt_level='O1',
+                                  tag=None, eval=False, throughput=False)
+        swin_config = get_config(args)
+
+        model = Swin_Unet(config=swin_config, img_size=img_size, num_classes=num_classes)
+
+        pretrain_path = swin_args.get('PRETRAIN_CKPT', None)
+        if pretrain_path and os.path.exists(pretrain_path):
+            model.load_from(swin_config)
+        return model
+
+    # 3. MedT
+    elif model_name == 'MedT':
+        model = MedT(img_size=img_size, num_classes=num_classes)
+        return model
+
+    # 4. JEPA_UPerNet
+    elif model_name == 'JEPA_UPerNet':
+        jepa_config_obj = _prepare_yacs_config(config, 'jepa_args')
         model = JEPA_UPerNet(config=jepa_config_obj, num_classes=num_classes)
-        model.load_from()  # 内部会根据 PRETRAIN_CKPT 是否为 "none" 决定是否加载
+        model.load_from()
         return model
 
-    # ---------------------------------------------------------
-    # 2. USFM_UPerNet 分支
-    # ---------------------------------------------------------
-    elif model_name == "USFM_UPerNet":
-        usfm_config_obj = _prepare_yacs_config(
-            model_name, config, 'usfm_args', img_size, project_root
-        )
-        model = USFM_UPerNet(config=usfm_config_obj, num_classes=num_classes)
-        model.load_from()  # 内部包含针对 USFM 键名的清洗逻辑
-        return model
-
-    # ---------------------------------------------------------
-    # 3. SwinUnet 分支
-    # ---------------------------------------------------------
-    elif model_name == "SwinUnet":
-        swin_section = config.get('swin_unet_args', {})
-        relative_yaml_path = swin_section.get('cfg')
-        if not relative_yaml_path:
-            raise ValueError("SwinUnet 需要在 config.json 的 'swin_unet_args' 中指定 'cfg' 路径")
-
-        absolute_yaml_path = project_root / relative_yaml_path.lstrip('./')
-
-        # 封装 Swin 专用的 Namespace 参数
-        swin_args = argparse.Namespace(
-            cfg=str(absolute_yaml_path),
-            batch_size=data_config.get('batch_size'),
-            zip=swin_section.get('zip', False),
-            cache_mode=swin_section.get('cache_mode', 'part'),
-            resume=swin_section.get('resume'),
-            opts=swin_section.get('opts'),
-            accumulation_steps=swin_section.get('accumulation-steps'),
-            use_checkpoint=swin_section.get('use-checkpoint'),
-            amp_opt_level=None, tag='default', eval=False, throughput=False
-        )
-
-        swin_config_obj = get_swin_config(swin_args)
-        swin_config_obj.defrost()
-        swin_config_obj.MODEL.SWIN.IN_CHANS = in_channels
-
-        # 同步预训练权重
-        pretrained_path_str = swin_section.get('PRETRAIN_CKPT')
-        if pretrained_path_str:
-            swin_config_obj.MODEL.PRETRAIN_CKPT = str(project_root / pretrained_path_str.lstrip('./'))
-
-        swin_config_obj.freeze()
-        model = SwinUnet(config=swin_config_obj, img_size=img_size, num_classes=num_classes)
-
-        if swin_config_obj.MODEL.PRETRAIN_CKPT:
-            model.load_from(swin_config_obj)
-        return model
-
-    # ---------------------------------------------------------
-    # 4. TransUnet 分支
-    # ---------------------------------------------------------
-    elif model_name == "TransUnet":
-        model = TransUnet(img_size=img_size, img_ch=in_channels, output_ch=num_classes)
-        vit_args = config.get('vit_seg_args', {})
-        if vit_args.get('vit_patches_path'):
-            model.load_from(weights_npz_path=vit_args['vit_patches_path'])
-        return model
-
-    # ---------------------------------------------------------
-    # 5. MedT 分支
-    # ---------------------------------------------------------
-    elif model_name == "MedT":
-        model = MedT(img_size=img_size, imgchan=in_channels, num_classes=num_classes)
+    # =========================================================================
+    # 5. 🚀 USFM 分支：完全弃用 yaml 和 yacs，直接传递 config 字典！
+    # =========================================================================
+    elif model_name in ['USFM_UPerNet', 'USFM_SegmentationModel']:
+        model = USFM_SegmentationModel(config=config, num_classes=num_classes)
+        model.load_from()
         return model
 
     else:
-        raise ValueError(f"无法识别的 Transformer 模型: '{model_name}'")
+        raise NotImplementedError(f"Model {model_name} is not supported yet.")
