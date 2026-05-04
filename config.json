@@ -9,7 +9,7 @@
     }
   },
   "data": {
-    "datasets": ["MyData"],
+    "datasets": ["busi"],
     "force_prepare": false,
     "target_size": 224,
     "batch_size": 16,

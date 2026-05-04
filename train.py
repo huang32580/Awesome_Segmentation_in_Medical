@@ -59,13 +59,11 @@ def get_usfm_layer_id(name, depth=12):
         return num_layers - 1
 
 
-# 改为接收字典
 def build_official_usfm_optimizer(model, usfm_args):
     lr = usfm_args.get('base_lr', 1e-4)
     weight_decay = usfm_args.get('weight_decay', 0.05)
     layer_decay = usfm_args.get('layer_decay', 0.65)
 
-    # 🚀 直接从配置字典中读取 depth，默认值为 12
     depth = usfm_args.get('depth', 12)
     num_layers = depth + 2
 
@@ -118,6 +116,10 @@ def main(config):
         all_dfs = [pd.read_csv(preparer.data_dir / f"{name}.csv") for name in data_config['datasets']]
         df = pd.concat(all_dfs, ignore_index=True)
 
+        # 🌟 修复划分验证集的问题核心：防范 Pandas 将 split 推断为数字，造成验证集切分为空
+        df['split'] = df['split'].astype(str).str.strip()
+
+
         loader_args = {
             'batch_size': data_config['batch_size'],
             'num_workers': data_config['num_workers'],
@@ -126,13 +128,14 @@ def main(config):
         }
 
         train_loader = BUSDataLoader(df, **loader_args, split=str(fold), is_test=False, augment=True)
-        val_loader = BUSDataLoader(df[df['split'] == str(fold)].copy(), **loader_args, split=str(fold), is_test=True)
+        # 遵循 v1 显式 copy 提取的风格，更加稳定
+        df_val = df[df['split'] == str(fold)].copy()
+        val_loader = BUSDataLoader(df_val, **loader_args, split=str(fold), is_test=True)
 
         model_type = config['arch']['type']
         if hasattr(cnn_models, model_type):
             model = config.init_obj('arch', cnn_models)
         elif model_type in ["TransUnet", "SwinUnet", "MedT", "JEPA_UPerNet", "USFM_SegmentationModel","USFM_UPerNet"]:
-            # 注意：这里的 config 传入的是 config.config 字典本身
             model = transformer_models.get_transformer_based_model(
                 model_name=model_type,
                 config=config.config,
@@ -156,10 +159,8 @@ def main(config):
         for key, value in config['trainer'].items():
             trainer_run_config[key] = value
 
-        # ======================= 动态构建优化器与调度器 =======================
         usfm_args = config.config.get('usfm_args', {})
-        is_official_usfm = (model_type in ['USFM_UPerNet', 'USFM_SegmentationModel'] and usfm_args.get('mode',
-                                                                                                       'local') == 'official')
+        is_official_usfm = (model_type in ['USFM_UPerNet', 'USFM_SegmentationModel'] and usfm_args.get('mode', 'local') == 'official')
 
         if is_official_usfm:
             print("\n🚀 [状态] 检测到 USFM 官方模式，挂载定制化优化器/调度器...")

@@ -1,4 +1,3 @@
-# src/trainer/trainer.py
 import os
 import numpy as np
 import torch
@@ -40,13 +39,16 @@ class Trainer:
         self.early_stopping_patience = config.get('early_stopping_patience', 10)
         self.epochs_without_improvement = 0
 
-        self.fixed_val_batch = next(iter(self.val_loader)) if self.val_loader else None
+        # 🌟 修复底层验证集空判问题：使用 is not None 防止 DataLoader 为空时被判定为 False
+        self.fixed_val_batch = next(iter(self.val_loader)) if self.val_loader is not None else None
 
     def train(self):
         """Full training logic."""
         for epoch in range(self.start_epoch, self.config['epochs'] + 1):
             train_log = self._train_epoch(epoch)
-            valid_log = self._valid_epoch(epoch) if self.val_loader else {}
+
+            # 🌟 修复底层验证集空判问题
+            valid_log = self._valid_epoch(epoch) if self.val_loader is not None else {}
 
             log = {'epoch': epoch, **train_log, **valid_log}
 
@@ -72,7 +74,8 @@ class Trainer:
                     print(f"🌟 Saved new best model (val_loss: {val_loss:.4f})")
                 else:
                     self.epochs_without_improvement += 1
-                    print(f"⚠️ Early stopping counter: {self.epochs_without_improvement}/{self.early_stopping_patience}")
+                    print(
+                        f"⚠️ Early stopping counter: {self.epochs_without_improvement}/{self.early_stopping_patience}")
 
                 if self.epochs_without_improvement >= self.early_stopping_patience:
                     print(f"\n🛑 Early stopping triggered after {epoch} epochs.")
@@ -97,14 +100,11 @@ class Trainer:
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
 
-            # ================= 兼容输出的分支逻辑 (字典/元组/张量) =================
             if isinstance(outputs, dict) and "pred" in outputs:
-                # 1. SegViT (ATMHead) 分支：将大字典传给 ATMLoss
                 loss = self.criterion(outputs, targets)
-                outputs = outputs["pred"]  # 重置 outputs 为最后的语义分割图，供后续计算 metrics
+                outputs = outputs["pred"]
 
             elif isinstance(outputs, tuple) and len(outputs) == 2:
-                # 2. UPerHead 官方双分支
                 out_main, out_aux = outputs
                 loss_main = self.criterion(out_main, targets)
                 loss_aux = self.criterion(out_aux, targets)
@@ -113,27 +113,21 @@ class Trainer:
                 outputs = out_main
 
             else:
-                # 3. 基础版 (CNNs / 单支路)
                 loss = self.criterion(outputs, targets)
-            # ====================================================================
 
             loss.backward()
             self.optimizer.step()
 
-            # 兼容 timm 的调度器 (官方 USFM 必用)
             if self.lr_scheduler is not None:
                 if self.config.get('is_timm_scheduler', False):
-                    self.lr_scheduler.step(epoch + batch_idx / len(self.train_loader)) # Timm 可以按步细粒度更新
+                    self.lr_scheduler.step(epoch + batch_idx / len(self.train_loader))
 
             self.train_metrics.update('loss', loss.item())
 
-
-            # For metrics, we detach and calculate IoU
             with torch.no_grad():
                 outputs_detached = outputs.detach()
                 batch_iou = iou_score(outputs_detached, targets)
 
-                # 🚀 终极暴力转换：无论返回什么，全部压平算均值，变成纯标量 float
                 if batch_iou is not None:
                     if isinstance(batch_iou, torch.Tensor):
                         batch_iou = batch_iou.float().mean().item()
@@ -146,7 +140,6 @@ class Trainer:
 
             pbar.set_postfix(**{k: f"{v:.4f}" for k, v in self.train_metrics.result().items()})
 
-        # 对于普通 PyTorch 调度器，在 epoch 结束后 step
         if self.lr_scheduler is not None and not self.config.get('is_timm_scheduler', False):
             self.lr_scheduler.step()
 
@@ -165,18 +158,15 @@ class Trainer:
 
                 outputs = self.model(inputs)
 
-                # ================= 兼容输出的分支逻辑 (验证集) =================
                 if isinstance(outputs, dict) and "pred" in outputs:
                     loss = self.criterion(outputs, targets)
                     outputs = outputs["pred"]
                 elif isinstance(outputs, tuple) and len(outputs) == 2:
                     out_main, out_aux = outputs
-                    # 验证阶段我们通常只算主路 Loss
                     loss = self.criterion(out_main, targets)
                     outputs = out_main
                 else:
                     loss = self.criterion(outputs, targets)
-                # ====================================================================
 
                 self.valid_metrics.update('loss', loss.item())
 
@@ -184,7 +174,6 @@ class Trainer:
                     metric_value = met(outputs, targets)
 
                     if metric_value is not None:
-                        # 🚀 终极暴力转换：确保它绝对是一个 Python float 标量
                         if isinstance(metric_value, torch.Tensor):
                             metric_value = metric_value.float().mean().item()
                         elif isinstance(metric_value, (np.ndarray, list, tuple)):
@@ -224,13 +213,14 @@ class Trainer:
     def _log_validation_images(self, epoch):
         """Logs a fixed batch of validation images, masks, and predictions to wandb."""
         if not wandb.run: return
+        if self.fixed_val_batch is None: return
+
         self.model.eval()
         images = self.fixed_val_batch['image'].to(self.device)
         gt_masks = self.fixed_val_batch['mask'].to(self.device)
 
         with torch.no_grad():
             outputs = self.model(images)
-            # 处理字典或元组以便取用于可视化的 pred_logits
             if isinstance(outputs, dict) and "pred" in outputs:
                 pred_logits = outputs["pred"]
             elif isinstance(outputs, tuple) and len(outputs) == 2:
