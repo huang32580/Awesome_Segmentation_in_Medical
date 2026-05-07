@@ -95,26 +95,37 @@ def main(config):
             # Detach for metric computation
             outputs = outputs.detach()
 
-            # Calculate metrics
-            batch_pa = pixel_accuracy(outputs, targets)
-            batch_dsc = dice_score(outputs, targets)
-            batch_hd95 = hd95_batch(outputs, targets)
-            batch_iou = iou_score(outputs, targets)
+            # --- 定义一个万能提取器，强行把各种输出转成 (Sum, Count) ---
+            def parse_metric(metric_out, b_size):
+                if metric_out is None: return 0.0, 0
+                if isinstance(metric_out, tuple) and len(metric_out) == 2:
+                    return metric_out[0], metric_out[1]  # 本身就是 (sum, count)
+                # 如果传回来的是均值(浮点数/Tensor)，就乘以 b_size 逆向还原为总和
+                val = metric_out.float().mean().item() if isinstance(metric_out, torch.Tensor) else float(
+                    np.mean(metric_out))
+                return val * b_size, b_size
+
+            curr_b_size = inputs.size(0)
+
+            # Calculate and Unpack
+            pa_sum, pa_count = parse_metric(pixel_accuracy(outputs, targets), targets.numel())
+            dsc_sum, dsc_count = parse_metric(dice_score(outputs, targets), curr_b_size)
+            hd95_sum, hd95_count = parse_metric(hd95_batch(outputs, targets), curr_b_size)
+            iou_sum, iou_count = parse_metric(iou_score(outputs, targets), curr_b_size)
 
             # Accumulate metrics
-            pa_total_pixels = targets.numel()
-            if batch_dsc is not None:
-                total_metrics_sum['DSC'] += batch_dsc * inputs.size(0)
-                total_metrics_count['DSC'] += inputs.size(0)
-            if batch_hd95 is not None and not pd.isna(batch_hd95):
-                total_metrics_sum['HD95'] += batch_hd95 * inputs.size(0)
-                total_metrics_count['HD95'] += inputs.size(0)
-            if batch_iou is not None:
-                total_metrics_sum['IoU'] += batch_iou * inputs.size(0)
-                total_metrics_count['IoU'] += inputs.size(0)
-            if batch_pa is not None:
-                total_metrics_sum['PA'] += batch_pa * pa_total_pixels
-                total_metrics_count['PA'] += pa_total_pixels
+            total_metrics_sum['PA'] += pa_sum
+            total_metrics_count['PA'] += pa_count
+
+            total_metrics_sum['DSC'] += dsc_sum
+            total_metrics_count['DSC'] += dsc_count
+
+            if hd95_count > 0 and not pd.isna(hd95_sum):
+                total_metrics_sum['HD95'] += hd95_sum
+                total_metrics_count['HD95'] += hd95_count
+
+            total_metrics_sum['IoU'] += iou_sum
+            total_metrics_count['IoU'] += iou_count
 
     # Calculate Final Averages
     final_results = {}

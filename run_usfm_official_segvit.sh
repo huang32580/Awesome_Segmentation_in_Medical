@@ -99,8 +99,9 @@ run_strategy() {
         echo -e "\n--- 测试 Fold ${fold} ---"
         if [ -f "$CHECKPOINT_PATH" ]; then
             echo "🧪 正在提取指标，使用的权重: ${CHECKPOINT_PATH}"
-            TEST_OUTPUT=$(python test.py -r "$CHECKPOINT_PATH" || true)
+            TEST_OUTPUT=$(python test.py -r "$CHECKPOINT_PATH" -c "$CONFIG_FILE" || true)
 
+            PA=$(echo "$TEST_OUTPUT" | grep "PA:" | cut -d':' -f2 | xargs || echo "0")
             PA=$(echo "$TEST_OUTPUT" | grep "PA:" | cut -d':' -f2 | xargs || echo "0")
             DSC=$(echo "$TEST_OUTPUT" | grep "DSC:" | cut -d':' -f2 | xargs || echo "0")
             HD95=$(echo "$TEST_OUTPUT" | grep "HD95:" | cut -d':' -f2 | xargs || echo "0")

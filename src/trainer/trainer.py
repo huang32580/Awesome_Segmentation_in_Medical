@@ -129,12 +129,21 @@ class Trainer:
                 batch_iou = iou_score(outputs_detached, targets)
 
                 if batch_iou is not None:
-                    if isinstance(batch_iou, torch.Tensor):
+                    # ============ 🚀 健壮的指标解析逻辑 ============
+                    if isinstance(batch_iou, tuple) and len(batch_iou) == 2:
+                        # 处理 (sum, count) 格式
+                        iou_sum, iou_count = batch_iou
+                        batch_iou = iou_sum / iou_count if iou_count > 0 else 0.0
+                    elif isinstance(batch_iou, torch.Tensor):
+                        # 处理普通的 Tensor
                         batch_iou = batch_iou.float().mean().item()
-                    elif isinstance(batch_iou, (np.ndarray, list, tuple)):
+                    elif isinstance(batch_iou, (np.ndarray, list)):
+                        # 处理普通的数组或列表（去掉了 tuple）
                         batch_iou = float(np.mean(batch_iou))
                     else:
+                        # 处理普通的标量数字
                         batch_iou = float(batch_iou)
+                    # ===============================================
 
                     self.train_metrics.update('iou_score', batch_iou)
 
@@ -170,16 +179,23 @@ class Trainer:
 
                 self.valid_metrics.update('loss', loss.item())
 
+                # 替换 _valid_epoch 中 for met in self.metric_fns: 下面的解析逻辑
                 for met in self.metric_fns:
                     metric_value = met(outputs, targets)
 
                     if metric_value is not None:
-                        if isinstance(metric_value, torch.Tensor):
+                        # ====== 智能解析不同指标返回格式 ======
+                        if isinstance(metric_value, tuple) and len(metric_value) == 2:
+                            # 如果是 (sum, count) 格式，用总和除以数量得到平均
+                            v_sum, v_count = metric_value
+                            metric_value = v_sum / v_count if v_count > 0 else 0.0
+                        elif isinstance(metric_value, torch.Tensor):
                             metric_value = metric_value.float().mean().item()
-                        elif isinstance(metric_value, (np.ndarray, list, tuple)):
+                        elif isinstance(metric_value, (np.ndarray, list)):
                             metric_value = float(np.mean(metric_value))
                         else:
                             metric_value = float(metric_value)
+                        # ====================================
 
                         if not np.isnan(metric_value):
                             self.valid_metrics.update(met.__name__, metric_value)
