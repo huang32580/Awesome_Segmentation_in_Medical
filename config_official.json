@@ -36,10 +36,10 @@
     "note": "在 official 模式下，本节点会被忽略，采用带 Warmup 的官方 timm 调度器"
   },
   "trainer": {
-    "epochs": 400,
+    "epochs": 800,
     "k_folds": 5,
     "checkpoint_dir": "checkpoints_official/",
-    "early_stopping_patience": 50,
+    "early_stopping_patience": 80,
     "freeze_mode": "none"
   },
   "wandb": {
@@ -54,7 +54,7 @@
     "PRETRAIN_CKPT": "./pretrained_models/USFM_latest.pth",
     "mode": "official",
     "aux_weight": 0.4,
-    "base_lr": 1e-4,
+    "base_lr": 3e-4,
     "warmup_lr": 5e-5,
     "min_lr": 0.0,
     "weight_decay": 0.05,

@@ -27,7 +27,7 @@ class FCNHead(nn.Module):
         return self.conv(x)
 
 
-class USFM_SegmentationModel(nn.Module):
+class USFM(nn.Module):
     """
     统一的 USFM 分割模型入口，支持动态切换 UPerHead 与 SegViT(ATMHead)
     """
@@ -37,7 +37,13 @@ class USFM_SegmentationModel(nn.Module):
 
         self.usfm_args = config.get('usfm_args', {})
         self.mode = self.usfm_args.get('mode', 'local')
-        self.decoder_type = self.usfm_args.get('decoder_type', 'UPerHead')
+        self.decoder_type = self.usfm_args.get('decoder_type', None)
+        if self.decoder_type is None:
+            raise ValueError(
+                "\n[ERROR] USFM 模型配置错误！\n"
+                "必须在 'usfm_args' 中明确指定 'decoder_type'。\n"
+                "可选值: 'UPerHead' (对应 UPerNet) 或 'SegViT' (对应 ATMHead)。"
+            )
 
         self.patch_size = self.usfm_args.get('patch_size', 16)
         self.embed_dim = self.usfm_args.get('embed_dim', 768)
@@ -69,7 +75,7 @@ class USFM_SegmentationModel(nn.Module):
 
         # 2. 动态构建解码器
         if self.decoder_type == 'UPerHead':
-            print("🚀 [Decoder] 初始化 UPerHead...")
+            print(f"🚀 [USFM] 已选择 UPerHead 解码器 (Mode: {self.mode})")
             self.pool_scales = [1, 2, 3, 6]
             self.fpn1 = nn.Sequential(
                 nn.ConvTranspose2d(self.embed_dim, self.embed_dim, kernel_size=2, stride=2),
@@ -90,7 +96,7 @@ class USFM_SegmentationModel(nn.Module):
                 self.aux_head = FCNHead(self.embed_dim, 256, num_classes)
 
         elif self.decoder_type == 'SegViT':
-            print("🚀 [Decoder] 初始化官方 SegViT (ATMHead)...")
+            print(f"🚀 [USFM] 已选择 SegViT 解码器 (Mode: {self.mode})")
             self.decode_head = ATMHead(
                 img_size=self.img_size,
                 in_channels=[self.embed_dim] * 4,
@@ -126,7 +132,7 @@ class USFM_SegmentationModel(nn.Module):
             print(f"Error: Path {pretrained_path} not found.")
             return
 
-        checkpoint = torch.load(pretrained_path, map_location='cpu')
+        checkpoint = torch.load(pretrained_path, map_location='cpu', weights_only=False)
         state_dict = checkpoint.get('model', checkpoint.get('state_dict', checkpoint))
 
         new_state_dict = {}
@@ -172,9 +178,22 @@ class USFM_SegmentationModel(nn.Module):
         # 2. 动态前传 Decoder 与输出分离
         if self.decoder_type == 'SegViT':
             # 官方 ATMHead 通常设计为直接吞入 ViT 的多层特征输出，内部完成插值
-            # 此时的 out_dict 包含了 pred_logits, pred_masks, pred, aux_outputs 等
             out_dict = self.decode_head(features)
-            # 直接返回字典，交由 trainer.py 中的 ATMLoss 去计算集合预测损失
+
+            # =======================================================
+            # 🚀 核心修复：Double Sigmoid Bug (Logit Inverse)
+            # 因为 Awesome 框架的 metrics 和 loss 默认会对输出求 sigmoid。
+            # 而 ATMHead 已经在内部算出了 [0, 1] 之间的严格概率。
+            # 这里将其逆变换回 Logits！
+            # =======================================================
+            prob = out_dict["pred"]
+            # 截断以防止出现 log(0) 导致 loss 或评估变成 NaN
+            prob = torch.clamp(prob, 1e-7, 1.0 - 1e-7)
+            fake_logits = torch.log(prob / (1.0 - prob))
+
+            # 用 fake_logits 替换掉原有的概率图
+            out_dict["pred"] = fake_logits
+
             return out_dict
 
         elif self.decoder_type == 'UPerHead':
@@ -188,7 +207,8 @@ class USFM_SegmentationModel(nn.Module):
             # 辅助头处理 (只在训练+官方模式开启)
             if self.training and self.mode == 'official':
                 aux_logits = self.aux_head(features[2])
-                out_aux = F.interpolate(aux_logits, size=(self.img_size, self.img_size), mode='bilinear', align_corners=False)
+                out_aux = F.interpolate(aux_logits, size=(self.img_size, self.img_size), mode='bilinear',
+                                        align_corners=False)
                 return out_main, out_aux
 
             return out_main

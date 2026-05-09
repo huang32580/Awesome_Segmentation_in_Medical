@@ -54,7 +54,7 @@ def main(config):
     model_type = config['arch']['type']
     if hasattr(cnn_models, model_type):
         model = config.init_obj('arch', cnn_models)
-    elif model_type in ["TransUnet", "SwinUnet", "MedT", "JEPA_UPerNet", "USFM_UPerNet", "USFM_SegmentationModel"]:
+    elif model_type in ["TransUnet", "SwinUnet", "MedT", "JEPA_UPerNet", "USFM"]:
         model = transformer_models.get_transformer_based_model(
             model_name=model_type,
             config=config.config,
@@ -65,7 +65,7 @@ def main(config):
 
     # Load Checkpoint
     print(f"Loading checkpoint: {resume_path} ...")
-    checkpoint = torch.load(resume_path, map_location=device)
+    checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
     state_dict = checkpoint['state_dict']
     model.load_state_dict(state_dict)
     model = model.to(device)

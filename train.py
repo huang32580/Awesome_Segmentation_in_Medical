@@ -135,7 +135,7 @@ def main(config):
         model_type = config['arch']['type']
         if hasattr(cnn_models, model_type):
             model = config.init_obj('arch', cnn_models)
-        elif model_type in ["TransUnet", "SwinUnet", "MedT", "JEPA_UPerNet", "USFM_SegmentationModel","USFM_UPerNet"]:
+        elif model_type in ["TransUnet", "SwinUnet", "MedT", "JEPA_UPerNet", "USFM"]:
             model = transformer_models.get_transformer_based_model(
                 model_name=model_type,
                 config=config.config,
@@ -145,7 +145,7 @@ def main(config):
             raise ValueError(f"Model type '{model_type}' not found.")
 
         if config.transfer_from and config.transfer_from.exists():
-            checkpoint = torch.load(config.transfer_from, map_location=device)
+            checkpoint = torch.load(config.transfer_from, map_location=device, weights_only=False)
             model.load_state_dict(checkpoint['state_dict'])
 
         model = apply_freezing(model, trainer_config.get('freeze_mode', 'none'))
@@ -160,7 +160,7 @@ def main(config):
             trainer_run_config[key] = value
 
         usfm_args = config.config.get('usfm_args', {})
-        is_official_usfm = (model_type in ['USFM_UPerNet', 'USFM_SegmentationModel'] and usfm_args.get('mode', 'local') == 'official')
+        is_official_usfm = (model_type == 'USFM' and usfm_args.get('mode', 'local') == 'official')
 
         if is_official_usfm:
             print("\n🚀 [状态] 检测到 USFM 官方模式，挂载定制化优化器/调度器...")

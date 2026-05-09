@@ -1,74 +1,84 @@
 #!/bin/bash
-
-# Exit immediately if a command exits with a non-zero status.
 set -e
 
-# --- CNN Experiment Configuration ---
-#DATASETS=("busi" "bus_uc" "busbra" "bus_uclm" "yap2018")
+# =========================================================================
+# 1. 实验全局配置 (CNN)
+# =========================================================================
 DATASETS=("busi")
-CNN_MODELS=("UNet")
-# CNN_MODELS=("UNet" "AttUNet" "UNetplus" "UNet3plus" "UNeXt" "CMUNet" "CMUNeXt")
+CNN_MODELS=("UNet" "AttUNet" "UNetplus" "UNet3plus" "UNeXt" "CMUNet" "CMUNeXt" "UKAN")
 
-# 优化：直接定义为字符串，方便传入 Python 解析
 CONFIG_FILE="config.json"
 NUM_FOLDS=5
 
-# ==========================================
-# 🎯 核心优化：让 Shell 脚本自动提取 JSON 里的 Checkpoint 路径
-# ==========================================
-CHECKPOINT_BASE_DIR=$(python -c "import json; print(json.load(open('${CONFIG_FILE}'))['trainer']['checkpoint_dir'])")
-# 去除可能存在的尾部斜杠，保证路径拼接安全
-CHECKPOINT_BASE_DIR=${CHECKPOINT_BASE_DIR%/}
+# 🚀 划分 Results 文件夹
+RESULTS_DIR="results/cnn"
+mkdir -p "$RESULTS_DIR"
 
-echo "Detected Checkpoint Directory from JSON: ${CHECKPOINT_BASE_DIR}"
+# =========================================================================
+# 2. 辅助 Python 脚本
+# =========================================================================
+cat << 'EOF' > modify_cnn_config.py
+import sys, json
 
-# --- Main Experiment Loop for CNNs ---
+config_file, exp_name, arch_type = sys.argv[1], sys.argv[2], sys.argv[3]
+
+with open(config_file, 'r', encoding='utf-8') as f:
+    config = json.load(f)
+
+config['name'] = exp_name
+config['arch']['type'] = arch_type
+
+# 🚀 划分 Checkpoints 文件夹
+config['trainer']['checkpoint_dir'] = f"checkpoints/cnn/{exp_name}"
+
+with open(config_file, 'w', encoding='utf-8') as f:
+    json.dump(config, f, indent=2, ensure_ascii=False)
+EOF
+
+# =========================================================================
+# 3. 主循环入口
+# =========================================================================
 for dataset in "${DATASETS[@]}"; do
   for model in "${CNN_MODELS[@]}"; do
 
-    echo -e "\n\n======================================================="
-    echo "  STARTING CNN EXPERIMENT: DATASET=${dataset} | MODEL=${model}"
-    echo "======================================================="
+    EXP_NAME="${dataset}_cnn_${model}"
+    echo -e "\n\033[1;36m=======================================================\033[0m"
+    echo -e "\033[1;36m 🚀 STARTING CNN EXPERIMENT: [${EXP_NAME}]\033[0m"
+    echo -e "\033[1;36m=======================================================\033[0m"
 
-    RUN_ID="lovasz_${dataset}_${model}"
+    python modify_cnn_config.py "$CONFIG_FILE" "$EXP_NAME" "$model"
 
-    # Check if training is already completed
-    NUM_CHECKPOINTS=0
-    if [ -d "$CHECKPOINT_BASE_DIR" ]; then
-        NUM_CHECKPOINTS=$(find "$CHECKPOINT_BASE_DIR" -name "${RUN_ID}_fold*_best.pth" | wc -l)
-    fi
+    CHECKPOINT_BASE_DIR=$(python -c "import json; print(json.load(open('${CONFIG_FILE}'))['trainer']['checkpoint_dir'])")
+    CHECKPOINT_BASE_DIR=${CHECKPOINT_BASE_DIR%/}
 
-    # Training Phase (Conditional)
-    if [ "$NUM_CHECKPOINTS" -eq "$NUM_FOLDS" ]; then
-      echo "All ${NUM_FOLDS} checkpoints found for ${RUN_ID}. Skipping training."
-    else
-      echo "Starting training for ${RUN_ID}. Found ${NUM_CHECKPOINTS}/${NUM_FOLDS} completed folds."
-      python train.py -c ${CONFIG_FILE} \
-                      --name "${RUN_ID}" \
-                      --datasets "${dataset}" \
-                      --model ${model}
-    fi
-
-    # Testing & Aggregation Phase
-    echo -e "\n--- Testing and Aggregating Results for ${RUN_ID} ---"
-
-    RESULTS_DIR="results"
-    mkdir -p ${RESULTS_DIR}
-    # 结果文件名动态附加 checkpoint 文件夹名称，防止覆盖旧实验结果
-    RESULTS_CSV="${RESULTS_DIR}/lovasz_results_${RUN_ID}_$(basename ${CHECKPOINT_BASE_DIR}).csv"
-
+    RESULTS_CSV="${RESULTS_DIR}/results_${EXP_NAME}.csv"
     if [ ! -f "$RESULTS_CSV" ]; then
-        echo "PA,DSC,HD95,IoU,GFLOPs,Params" > ${RESULTS_CSV}
+        echo "Fold,PA,DSC,HD95,IoU,GFLOPs,Params" > "$RESULTS_CSV"
     fi
 
+    # 训练检查
+    NEED_TRAIN=false
     for fold in $(seq 1 ${NUM_FOLDS}); do
-      CHECKPOINT_PATH="${CHECKPOINT_BASE_DIR}/${RUN_ID}_fold${fold}_best.pth"
+        if [ ! -f "${CHECKPOINT_BASE_DIR}/${EXP_NAME}_fold${fold}_best.pth" ]; then
+            NEED_TRAIN=true
+            break
+        fi
+    done
 
+    if [ "$NEED_TRAIN" = true ]; then
+      echo "🔥 开始 CNN 训练 (1-${NUM_FOLDS}折)..."
+      python train.py -c "$CONFIG_FILE"
+    else
+      echo "✅ 所有权重已存在，跳过训练。"
+    fi
+
+    # 测试环节
+    echo -e "\n--- 🧪 测试提取指标 ---"
+    for fold in $(seq 1 ${NUM_FOLDS}); do
+      CHECKPOINT_PATH="${CHECKPOINT_BASE_DIR}/${EXP_NAME}_fold${fold}_best.pth"
       if [ -f "$CHECKPOINT_PATH" ]; then
-        # 加入 || true 防止测试出错时整个流水线崩溃
-        TEST_OUTPUT=$(python test.py -r "$CHECKPOINT_PATH" || true)
+        TEST_OUTPUT=$(python test.py -r "$CHECKPOINT_PATH" -c "$CONFIG_FILE" || true)
 
-        # 加入 || echo "0" 防止 grep 匹配失败导致 xargs 报错
         PA=$(echo "$TEST_OUTPUT" | grep "PA:" | cut -d':' -f2 | xargs || echo "0")
         DSC=$(echo "$TEST_OUTPUT" | grep "DSC:" | cut -d':' -f2 | xargs || echo "0")
         HD95=$(echo "$TEST_OUTPUT" | grep "HD95:" | cut -d':' -f2 | xargs || echo "0")
@@ -76,16 +86,12 @@ for dataset in "${DATASETS[@]}"; do
         GFLOPS=$(echo "$TEST_OUTPUT" | grep "GFLOPs:" | cut -d':' -f2 | xargs || echo "0")
         PARAMS=$(echo "$TEST_OUTPUT" | grep "Params:" | cut -d':' -f2 | xargs || echo "0")
 
-        echo "${PA},${DSC},${HD95},${IOU},${GFLOPS},${PARAMS}" >> ${RESULTS_CSV}
+        echo "${fold},${PA},${DSC},${HD95},${IOU},${GFLOPS},${PARAMS}" >> "$RESULTS_CSV"
+        echo "📊 Fold ${fold} - DSC: ${DSC} | IoU: ${IOU}"
       else
-        echo "Warning: Checkpoint for fold ${fold} not found at ${CHECKPOINT_PATH}!"
+        echo "❌ 警告: 找不到权重文件 ${CHECKPOINT_PATH}!"
       fi
     done
-
-    echo "--- CNN EXPERIMENT FINISHED: ${RUN_ID} ---"
   done
 done
-
-echo -e "\n\n======================================================="
-echo "  ALL CNN EXPERIMENTS COMPLETED"
-echo "======================================================="
+echo -e "\n\033[1;36m🎉 ALL CNN EXPERIMENTS COMPLETED 🎉\033[0m"

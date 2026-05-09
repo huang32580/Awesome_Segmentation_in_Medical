@@ -1,5 +1,5 @@
 {
-  "name": "BUS_Segmentation_Experiment",
+  "name": "busi_UNet_experiment",
   "n_gpu": 1,
   "arch": {
     "type": "USFM_SegmentationModel",
@@ -12,7 +12,7 @@
     "datasets": ["busi"],
     "force_prepare": false,
     "target_size": 224,
-    "batch_size": 16,
+    "batch_size": 32,
     "num_workers": 8,
     "use_pad": false
   },

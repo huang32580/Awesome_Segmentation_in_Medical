@@ -17,7 +17,7 @@ from .medicalT.axialnet import MedT
 from .jepa_upernet.jepa_upernet import JEPA_UPerNet
 
 # 🚀 重点：这里改为导入我们重构好的 USFM_SegmentationModel
-from .jepa_upernet.usfm_upernet import USFM_SegmentationModel
+from .jepa_upernet.usfm_upernet import USFM
 
 
 def _prepare_yacs_config(config_dict, section_key):
@@ -111,8 +111,8 @@ def get_transformer_based_model(model_name, config, num_classes=1):
     # =========================================================================
     # 5. 🚀 USFM 分支：完全弃用 yaml 和 yacs，直接传递 config 字典！
     # =========================================================================
-    elif model_name in ['USFM_UPerNet', 'USFM_SegmentationModel']:
-        model = USFM_SegmentationModel(config=config, num_classes=num_classes)
+    elif model_name == 'USFM':
+        model = USFM(config=config, num_classes=num_classes)
         model.load_from()
         return model
 

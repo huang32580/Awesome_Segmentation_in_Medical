@@ -34,13 +34,41 @@ class Trainer:
         self.checkpoint_dir = Path(config.get('checkpoint_dir', 'checkpoints'))
         self.checkpoint_dir.mkdir(exist_ok=True, parents=True)
         self.checkpoint_name = config.get('checkpoint_name', 'best_model.pth')
-        self.best_val_loss = float('inf')
+
+        # 🚀 恢复排名系统所需变量，替换原来的 best_val_loss
+        self.metric_history = []
         self.best_epoch_info = {}
+
         self.early_stopping_patience = config.get('early_stopping_patience', 10)
         self.epochs_without_improvement = 0
 
-        # 🌟 修复底层验证集空判问题：使用 is not None 防止 DataLoader 为空时被判定为 False
+        # 🌟 修复底层验证集空判问题
         self.fixed_val_batch = next(iter(self.val_loader)) if self.val_loader is not None else None
+
+    def _update_and_check_best(self, val_log, current_epoch):
+        """
+        🚀 综合排名评估策略：防止仅看 loss 导致的性能抖动
+        """
+        current_metrics = {'epoch': current_epoch, **val_log}
+        self.metric_history.append(current_metrics)
+
+        history_df = pd.DataFrame(self.metric_history)
+
+        # 考虑到指标前缀有 val_，这里的 key 严格匹配
+        history_df['loss_rank'] = history_df['val_loss'].rank(ascending=True, method='dense')
+        history_df['hd95_batch_rank'] = history_df['val_hd95_batch'].rank(ascending=True, method='dense')
+        history_df['iou_score_rank'] = history_df['val_iou_score'].rank(ascending=False, method='dense')
+        history_df['dice_score_rank'] = history_df['val_dice_score'].rank(ascending=False, method='dense')
+
+        rank_cols = ['loss_rank', 'hd95_batch_rank', 'iou_score_rank', 'dice_score_rank']
+        history_df['avg_rank'] = history_df[rank_cols].mean(axis=1)
+
+        best_epoch_idx = history_df['avg_rank'].idxmin()
+        self.best_epoch_info = history_df.loc[best_epoch_idx].to_dict()
+
+        if self.best_epoch_info['epoch'] == current_epoch:
+            return True
+        return False
 
     def train(self):
         """Full training logic."""
@@ -64,14 +92,15 @@ class Trainer:
                 self._log_validation_images(epoch)
 
             # Checkpoint and Early Stopping Logic
-            val_loss = valid_log.get('val_loss')
-            if val_loss is not None:
-                if val_loss < self.best_val_loss:
-                    self.best_val_loss = val_loss
+            if valid_log:
+                # 🚀 使用综合排名机制判断是否是最佳模型
+                is_new_best = self._update_and_check_best(valid_log, epoch)
+
+                if is_new_best:
                     self.epochs_without_improvement = 0
-                    self.best_epoch_info = log
                     self._save_checkpoint()
-                    print(f"🌟 Saved new best model (val_loss: {val_loss:.4f})")
+                    print(
+                        f"🌟 Saved new best model at epoch {epoch}! (Avg Rank: {self.best_epoch_info.get('avg_rank', 0):.4f})")
                 else:
                     self.epochs_without_improvement += 1
                     print(
@@ -79,7 +108,8 @@ class Trainer:
 
                 if self.epochs_without_improvement >= self.early_stopping_patience:
                     print(f"\n🛑 Early stopping triggered after {epoch} epochs.")
-                    print("🏆 Best Epoch Info:", self.best_epoch_info)
+                    print("🏆 Best Epoch Info:",
+                          {k: f"{v:.4f}" if isinstance(v, float) else v for k, v in self.best_epoch_info.items()})
                     break
 
         if wandb.run:
@@ -122,30 +152,35 @@ class Trainer:
                 if self.config.get('is_timm_scheduler', False):
                     self.lr_scheduler.step(epoch + batch_idx / len(self.train_loader))
 
-            self.train_metrics.update('loss', loss.item())
+            self.train_metrics.update('loss', loss.item(), n=targets.size(0))
 
             with torch.no_grad():
                 outputs_detached = outputs.detach()
-                batch_iou = iou_score(outputs_detached, targets)
+
+                # 🚀 动态判断：防止 Double Sigmoid，同时拯救 CNN
+                if outputs_detached.max() > 1.0 or outputs_detached.min() < 0.0:
+                    pred_probs = torch.sigmoid(outputs_detached)
+                else:
+                    pred_probs = outputs_detached
+
+                # 🚀 用经过概率校准的值计算 IoU
+                batch_iou = iou_score(pred_probs, targets)
 
                 if batch_iou is not None:
                     # ============ 🚀 健壮的指标解析逻辑 ============
                     if isinstance(batch_iou, tuple) and len(batch_iou) == 2:
-                        # 处理 (sum, count) 格式
                         iou_sum, iou_count = batch_iou
                         batch_iou = iou_sum / iou_count if iou_count > 0 else 0.0
                     elif isinstance(batch_iou, torch.Tensor):
-                        # 处理普通的 Tensor
                         batch_iou = batch_iou.float().mean().item()
                     elif isinstance(batch_iou, (np.ndarray, list)):
-                        # 处理普通的数组或列表（去掉了 tuple）
                         batch_iou = float(np.mean(batch_iou))
                     else:
-                        # 处理普通的标量数字
                         batch_iou = float(batch_iou)
                     # ===============================================
 
-                    self.train_metrics.update('iou_score', batch_iou)
+                    # 🚀 补全权重参数 n
+                    self.train_metrics.update('iou_score', batch_iou, n=targets.size(0))
 
             pbar.set_postfix(**{k: f"{v:.4f}" for k, v in self.train_metrics.result().items()})
 
@@ -177,16 +212,22 @@ class Trainer:
                 else:
                     loss = self.criterion(outputs, targets)
 
-                self.valid_metrics.update('loss', loss.item())
+                # 🚀 补全验证 loss 的权重参数 n
+                self.valid_metrics.update('loss', loss.item(), n=targets.size(0))
 
-                # 替换 _valid_epoch 中 for met in self.metric_fns: 下面的解析逻辑
+                # 🚀 动态判断：防止 Double Sigmoid，同时拯救 CNN
+                if outputs.max() > 1.0 or outputs.min() < 0.0:
+                    pred_probs = torch.sigmoid(outputs)
+                else:
+                    pred_probs = outputs
+
                 for met in self.metric_fns:
-                    metric_value = met(outputs, targets)
+                    # 🚀 用经过概率校准的值计算指标
+                    metric_value = met(pred_probs, targets)
 
                     if metric_value is not None:
                         # ====== 智能解析不同指标返回格式 ======
                         if isinstance(metric_value, tuple) and len(metric_value) == 2:
-                            # 如果是 (sum, count) 格式，用总和除以数量得到平均
                             v_sum, v_count = metric_value
                             metric_value = v_sum / v_count if v_count > 0 else 0.0
                         elif isinstance(metric_value, torch.Tensor):
@@ -198,7 +239,8 @@ class Trainer:
                         # ====================================
 
                         if not np.isnan(metric_value):
-                            self.valid_metrics.update(met.__name__, metric_value)
+                            # 🚀 补全所有指标的权重参数 n
+                            self.valid_metrics.update(met.__name__, metric_value, n=targets.size(0))
 
         return {f'val_{k}': v for k, v in self.valid_metrics.result().items()}
 
@@ -207,7 +249,7 @@ class Trainer:
         print(f"Loading checkpoint: {resume_path} ...")
         checkpoint = torch.load(resume_path, map_location=self.device)
         self.start_epoch = checkpoint['best_epoch_info'].get('epoch', 0) + 1
-        self.best_val_loss = checkpoint['best_epoch_info'].get('val_loss', float('inf'))
+        self.best_epoch_info = checkpoint.get('best_epoch_info', {})
         self.model.load_state_dict(checkpoint['state_dict'])
         print(f"Checkpoint loaded. Resuming from epoch {self.start_epoch}.")
 
@@ -244,6 +286,8 @@ class Trainer:
             else:
                 pred_logits = outputs
 
+            # 这里的可视化为了好看，统统过一遍 Sigmoid 也没关系，
+            # 即使发生 double sigmoid 也就是亮一点
             pred_masks = torch.sigmoid(pred_logits)
 
         images_grid = make_grid(images, normalize=True)
