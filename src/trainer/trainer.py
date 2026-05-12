@@ -35,8 +35,8 @@ class Trainer:
         self.checkpoint_dir.mkdir(exist_ok=True, parents=True)
         self.checkpoint_name = config.get('checkpoint_name', 'best_model.pth')
 
-        # 🚀 恢复排名系统所需变量，替换原来的 best_val_loss
-        self.metric_history = []
+        # 🔙 恢复为原版的保存策略变量
+        self.mnt_best = np.inf  # 记录最低的 val_loss
         self.best_epoch_info = {}
 
         self.early_stopping_patience = config.get('early_stopping_patience', 10)
@@ -47,27 +47,20 @@ class Trainer:
 
     def _update_and_check_best(self, val_log, current_epoch):
         """
-        🚀 综合排名评估策略：防止仅看 loss 导致的性能抖动
+        🔙 原版最佳模型评估策略：以 val_loss 为唯一标准（Loss 越低越好）
         """
-        current_metrics = {'epoch': current_epoch, **val_log}
-        self.metric_history.append(current_metrics)
+        # 获取当前 epoch 的验证集 loss
+        val_loss = val_log.get('val_loss', np.inf)
 
-        history_df = pd.DataFrame(self.metric_history)
+        # 判断是否比历史最好记录更低
+        is_best = val_loss < self.mnt_best
 
-        # 考虑到指标前缀有 val_，这里的 key 严格匹配
-        history_df['loss_rank'] = history_df['val_loss'].rank(ascending=True, method='dense')
-        history_df['hd95_batch_rank'] = history_df['val_hd95_batch'].rank(ascending=True, method='dense')
-        history_df['iou_score_rank'] = history_df['val_iou_score'].rank(ascending=False, method='dense')
-        history_df['dice_score_rank'] = history_df['val_dice_score'].rank(ascending=False, method='dense')
-
-        rank_cols = ['loss_rank', 'hd95_batch_rank', 'iou_score_rank', 'dice_score_rank']
-        history_df['avg_rank'] = history_df[rank_cols].mean(axis=1)
-
-        best_epoch_idx = history_df['avg_rank'].idxmin()
-        self.best_epoch_info = history_df.loc[best_epoch_idx].to_dict()
-
-        if self.best_epoch_info['epoch'] == current_epoch:
+        if is_best:
+            # 更新记录
+            self.mnt_best = val_loss
+            self.best_epoch_info = {'epoch': current_epoch, **val_log}
             return True
+
         return False
 
     def train(self):

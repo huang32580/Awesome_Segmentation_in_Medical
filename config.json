@@ -12,7 +12,7 @@
     "datasets": ["busi"],
     "force_prepare": false,
     "target_size": 224,
-    "batch_size": 32,
+    "batch_size": 16,
     "num_workers": 8,
     "use_pad": false
   },

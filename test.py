@@ -47,9 +47,19 @@ def main(config):
     if 'fold' in resume_path:
         fold_str = resume_path.split('fold')[1][0]
 
-    print(f"[*] Testing on Fold: {fold_str}")
-    test_loader = BUSDataLoader(df[df['split'] == fold_str].copy(), **loader_args, split=fold_str, is_test=True)
+    # ================= 🚀 修复 1：测试集划分问题 =================
+    # 在标准 5 折交叉验证中，'test' 是完全独立且未参与划分的盲测集
+    print(f"[*] Testing on Held-out Test Set (Model trained on Fold: {fold_str})")
 
+    # 获取真正的 test 集，而不是当前 fold 的验证集
+    test_df = df[df['split'] == 'test'].copy()
+
+    # 防御性编程：万一你的 CSV 没有叫 'test' 的划分，退回使用验证集（避免报错崩溃）
+    if len(test_df) == 0:
+        print("⚠️ 警告：CSV中未发现 split=='test' 的数据！回退使用当前折的验证集作为测试。")
+        test_df = df[df['split'] == fold_str].copy()
+
+    test_loader = BUSDataLoader(test_df, **loader_args, split='test', is_test=True)
     # Initialize Model
     model_type = config['arch']['type']
     if hasattr(cnn_models, model_type):
@@ -81,19 +91,31 @@ def main(config):
             inputs = data['image'].to(device)
             targets = data['mask'].to(device)
 
+            # ==============================================================
+            # 1. 核心缺失部分：将输入送入模型，拿到初始输出 (你之前漏了这行)
+            # ==============================================================
             outputs = model(inputs)
 
-            # ================= 🚀 核心修改：兼容各种模型的输出 =================
+            # ==============================================================
+            # 2. 兼容各种模型的输出格式（字典、元组等）
+            # ==============================================================
             if isinstance(outputs, dict) and "pred" in outputs:
                 # 针对 SegViT(ATMHead) 字典输出
                 outputs = outputs["pred"]
-            elif isinstance(outputs, tuple) and len(outputs) == 2:
-                # 针对 UPerNet (主输出, 辅助输出) 元组，测试时只用主输出
+            elif isinstance(outputs, tuple) and len(outputs) >= 2:
+                # 针对 UPerNet 等元组输出，测试时只用主输出
                 outputs = outputs[0]
-            # =================================================================
 
-            # Detach for metric computation
+            # ==============================================================
+            # 3. 脱离计算图
+            # ==============================================================
             outputs = outputs.detach()
+
+            # ==============================================================
+            # 4. 补充缺失的 Sigmoid，防止 Logits 导致 Dice/IoU 极低
+            # ==============================================================
+            if outputs.max() > 1.0 or outputs.min() < 0.0:
+                outputs = torch.sigmoid(outputs)
 
             # --- 定义一个万能提取器，强行把各种输出转成 (Sum, Count) ---
             def parse_metric(metric_out, b_size):
