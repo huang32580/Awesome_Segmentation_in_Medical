@@ -19,7 +19,7 @@ RESULTS_DIR="results/vit"
 mkdir -p "$RESULTS_DIR"
 
 # =========================================================================
-# 2. 辅助 Python 脚本
+# 2. 辅助 Python 脚本 (已修改：支持动态切换 Loss)
 # =========================================================================
 cat << 'EOF' > modify_vit_config.py
 import sys, json
@@ -36,9 +36,28 @@ with open(config_file, 'r', encoding='utf-8') as f:
 
 config['name'] = exp_name
 config['arch']['type'] = arch_type
-
-# 🚀 划分 Checkpoints 文件夹
 config['trainer']['checkpoint_dir'] = f"checkpoints/vit/{exp_name}"
+
+# 🌟 核心修改：动态切换 Loss 函数
+if decoder_type == 'SegViT':
+    # 只要是 SegViT (无论是 local 还是 official)，都强制使用解析字典的 ATMLoss
+    config['loss'] = {
+        "type": "ATMLoss",
+        "args": {
+            "num_classes": 1,
+            "dec_layers": 3,
+            "mask_weight": 20.0,
+            "dice_weight": 1.0,
+            "cls_weight": 1.0
+        }
+    }
+else:
+    # ⚠️ 恢复为其他模型使用的常规 Loss。
+    # 这里默认填了 BCEDiceLoss，如果你的 config.json 原本用的是 DiceLoss 或其他名字，请在这里修改！
+    config['loss'] = {
+        "type": "BCEDiceLoss",
+        "args": {}
+    }
 
 if arch_type == 'USFM':
     if 'usfm_args' not in config:
@@ -132,10 +151,7 @@ for dataset in "${DATASETS[@]}"; do
     for decoder in "${USFM_DECODERS[@]}"; do
         for mode in "${USFM_MODES[@]}"; do
 
-            if [ "$decoder" == "SegViT" ] && [ "$mode" == "local" ]; then
-                echo -e "\n\033[1;33m⚠️  [跳过] 发现 SegViT + local 冲突组合，传统 Loss 无法处理该字典输出。\033[0m"
-                continue
-            fi
+            # 🌟 核心修改：这里已经删除了跳过 SegViT + local 的逻辑！
 
             DECODER_LOWER=$(echo "$decoder" | tr '[:upper:]' '[:lower:]')
             EXP_NAME="${dataset}_usfm_${DECODER_LOWER}_${mode}"
@@ -145,4 +161,4 @@ for dataset in "${DATASETS[@]}"; do
     done
 done
 
-echo -e "\n\033[1;32m🎉 ALL ViT EXPERIMENTS COMPLETED 🎉\033[0m"
+echo -e "\n\033[1;32m🎉 ALL ViT EXPERIMENTS COMPLETED 🎉\033[0m"························································································````

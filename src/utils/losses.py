@@ -304,6 +304,8 @@ class ATMLoss(nn.Module):
 
     def prepare_targets(self, targets):
         new_targets = []
+        # 【新增】🚀 强制二值化收束：无论原始前景像素是 1 还是 255，统统归一化为 0(背景) 和 1(病灶)
+        targets = (targets > 0).long()
         for targets_per_image in targets:
             # 确保 mask 为整数以便提取
             t_img = targets_per_image.long()

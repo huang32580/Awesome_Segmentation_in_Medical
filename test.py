@@ -6,6 +6,7 @@ from tqdm import tqdm
 from thop import profile
 from pathlib import Path
 from collections import defaultdict
+import numpy as np
 import warnings
 
 warnings.filterwarnings("ignore", message="Importing from timm.models.layers is deprecated.*", category=FutureWarning)
@@ -47,7 +48,7 @@ def main(config):
     if 'fold' in resume_path:
         fold_str = resume_path.split('fold')[1][0]
 
-    # ================= 🚀 修复 1：测试集划分问题 =================
+    # ================= 🚀 测试集划分问题 =================
     # 在标准 5 折交叉验证中，'test' 是完全独立且未参与划分的盲测集
     print(f"[*] Testing on Held-out Test Set (Model trained on Fold: {fold_str})")
 
@@ -60,6 +61,7 @@ def main(config):
         test_df = df[df['split'] == fold_str].copy()
 
     test_loader = BUSDataLoader(test_df, **loader_args, split='test', is_test=True)
+
     # Initialize Model
     model_type = config['arch']['type']
     if hasattr(cnn_models, model_type):
@@ -72,6 +74,14 @@ def main(config):
         )
     else:
         raise ValueError(f"Model type '{model_type}' not found.")
+
+    # ==============================================================
+    # 🚀 健壮性改进：提前解析配置，决定输出是否已经是概率图
+    # ==============================================================
+    usfm_args = config.config.get('usfm_args', {})
+    decoder_type = usfm_args.get('decoder_type', '')
+    # 只有 SegViT(ATMHead) 出来的 pred 是 0-1 概率图，其他都是 Logits
+    output_is_prob = (model_type == 'USFM' and decoder_type == 'SegViT')
 
     # Load Checkpoint
     print(f"Loading checkpoint: {resume_path} ...")
@@ -92,7 +102,7 @@ def main(config):
             targets = data['mask'].to(device)
 
             # ==============================================================
-            # 1. 核心缺失部分：将输入送入模型，拿到初始输出 (你之前漏了这行)
+            # 1. 将输入送入模型，拿到初始输出
             # ==============================================================
             outputs = model(inputs)
 
@@ -112,9 +122,13 @@ def main(config):
             outputs = outputs.detach()
 
             # ==============================================================
-            # 4. 补充缺失的 Sigmoid，防止 Logits 导致 Dice/IoU 极低
+            # 4. 🚀 配置驱动的概率校准，彻底解决数值盲猜的 Bug
             # ==============================================================
-            if outputs.max() > 1.0 or outputs.min() < 0.0:
+            if output_is_prob:
+                # SegViT 的输出已经是 0-1 的概率图，直接使用
+                outputs = outputs
+            else:
+                # UPerNet 或传统 CNN 的输出是 Logits，需要加 Sigmoid
                 outputs = torch.sigmoid(outputs)
 
             # --- 定义一个万能提取器，强行把各种输出转成 (Sum, Count) ---

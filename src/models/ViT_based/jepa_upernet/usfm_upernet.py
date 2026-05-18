@@ -125,25 +125,52 @@ class USFM(nn.Module):
     def load_from(self):
         pretrained_path = self.usfm_args.get('PRETRAIN_CKPT', None)
         if not pretrained_path or str(pretrained_path).lower() == 'none':
-            print("WARNING: No USFM pretrain checkpoint. Training FROM SCRATCH.")
+            print("WARNING: No USFM pretrain checkpoint.")
             return
 
         if not os.path.exists(pretrained_path):
             print(f"Error: Path {pretrained_path} not found.")
             return
 
+        # 加载原始文件
         checkpoint = torch.load(pretrained_path, map_location='cpu', weights_only=False)
+        # 自动获取权重字典 (处理不同保存格式)
         state_dict = checkpoint.get('model', checkpoint.get('state_dict', checkpoint))
 
+        print("\n" + "=" * 100)
+        print(f"📁 预训练权重文件: {pretrained_path}")
+
+        # 1. 打印当前代码中定义的模型层名 (Model State Dict)
+        print("\n--- [当前模型 Backbone 层名及维度 (代码定义)] ---")
+        model_keys = list(self.backbone.state_dict().keys())
+        for k in model_keys[:15]:  # 打印前15层作为示例
+            param = self.backbone.state_dict()[k]
+            print(f"Model Key: {k:<60} | Shape: {list(param.shape)}")
+        print(f"... (总计 {len(model_keys)} 条参数)")
+
+        # 2. 打印权重文件里的原始层名 (Raw Checkpoint State Dict)
+        print("\n--- [权重文件原始层名及维度 (RAW Checkpoint)] ---")
+        ckpt_keys = list(state_dict.keys())
+        for k in ckpt_keys[:15]:  # 打印前15层作为示例
+            v = state_dict[k]
+            print(f"Ckpt Key:  {k:<60} | Shape: {list(v.shape)}")
+        print(f"... (总计 {len(ckpt_keys)} 条参数)")
+
+        # 3. 执行匹配逻辑 (你可以通过打印看看到底需要去掉什么前缀)
         new_state_dict = {}
         for k, v in state_dict.items():
-            if 'predictor' in k or 'mask_token' in k or 'head' in k:
-                continue
+            # 这里是原本的“清洗”逻辑，你可以观察 k 和上面 Model Key 的差异
+            # 常见的差异是多了 'backbone.' 或 'module.'
             clean_k = k.replace('module.', '').replace('encoder.', '').replace('backbone.', '')
             new_state_dict[clean_k] = v
 
         msg = self.backbone.load_state_dict(new_state_dict, strict=False)
-        print(f"\nUSFM Pretrained Weights Loaded. Missing Keys: {len(msg.missing_keys)}")
+
+        print("\n--- [最终加载统计] ---")
+        print(f"成功匹配并加载的条目数: {len(new_state_dict) - len(msg.unexpected_keys)}")
+        print(f"模型中未找到权重的层 (Missing): {len(msg.missing_keys)}")
+        print(f"权重文件中多余的层 (Unexpected): {len(msg.unexpected_keys)}")
+        print("=" * 100 + "\n")
 
     def forward_features(self, x):
         B = x.shape[0]
@@ -175,40 +202,29 @@ class USFM(nn.Module):
         # 1. 提取 Backbone 纯特征 [B, C, H, W] 的列表
         features = self.forward_features(x)
 
-        # 2. 动态前传 Decoder 与输出分离
         if self.decoder_type == 'SegViT':
-            # 官方 ATMHead 通常设计为直接吞入 ViT 的多层特征输出，内部完成插值
-            out_dict = self.decode_head(features)
+            return self.decode_head(features)  # 直接返回字典，包含 pred, pred_logits, pred_masks 等
 
-            # =======================================================
-            # 🚀 核心修复：Double Sigmoid Bug (Logit Inverse)
-            # 因为 Awesome 框架的 metrics 和 loss 默认会对输出求 sigmoid。
-            # 而 ATMHead 已经在内部算出了 [0, 1] 之间的严格概率。
-            # 这里将其逆变换回 Logits！
-            # =======================================================
-            prob = out_dict["pred"]
-            # 截断以防止出现 log(0) 导致 loss 或评估变成 NaN
-            prob = torch.clamp(prob, 1e-7, 1.0 - 1e-7)
-            fake_logits = torch.log(prob / (1.0 - prob))
-
-            # 用 fake_logits 替换掉原有的概率图
-            out_dict["pred"] = fake_logits
-
-            return out_dict
 
         elif self.decoder_type == 'UPerHead':
+
             ops = [self.fpn1, self.fpn2, self.fpn3, self.fpn4]
+
             head_inputs = [ops[i](features[i]) for i in range(len(features))]
+
             logits = self.decode_head(head_inputs)
 
-            # 插值还原至原图大小
             out_main = F.interpolate(logits, size=(self.img_size, self.img_size), mode='bilinear', align_corners=False)
 
-            # 辅助头处理 (只在训练+官方模式开启)
-            if self.training and self.mode == 'official':
+            # 🚀 将原来的 `self.mode == 'official'` 改为包含 'local_aux'
+
+            if self.training and self.mode in ['official', 'local_aux']:
                 aux_logits = self.aux_head(features[2])
+
                 out_aux = F.interpolate(aux_logits, size=(self.img_size, self.img_size), mode='bilinear',
+
                                         align_corners=False)
+
                 return out_main, out_aux
 
             return out_main

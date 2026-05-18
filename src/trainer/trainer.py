@@ -20,6 +20,18 @@ class Trainer:
         self.criterion = criterion
         self.optimizer = optimizer
         self.config = config
+
+        # 🚀 健壮性改进：显式定义输出属性
+        self.arch_type = config.get('arch', {}).get('type', '')
+        self.usfm_args = config.get('usfm_args', {})
+        self.decoder_type = self.usfm_args.get('decoder_type', '')
+
+        # 逻辑：只有 SegViT (ATMHead) 出来的 "pred" 是概率图，其他 (UPerHead, CNN) 都是 Logits
+        if self.arch_type == 'USFM' and self.decoder_type == 'SegViT':
+            self.output_is_prob = True
+        else:
+            self.output_is_prob = False
+
         self.device = device
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -35,8 +47,8 @@ class Trainer:
         self.checkpoint_dir.mkdir(exist_ok=True, parents=True)
         self.checkpoint_name = config.get('checkpoint_name', 'best_model.pth')
 
-        # 🔙 恢复为原版的保存策略变量
-        self.mnt_best = np.inf  # 记录最低的 val_loss
+        # 🚀 替换为平均排名策略所需的变量
+        self.metric_history = []
         self.best_epoch_info = {}
 
         self.early_stopping_patience = config.get('early_stopping_patience', 10)
@@ -47,18 +59,47 @@ class Trainer:
 
     def _update_and_check_best(self, val_log, current_epoch):
         """
-        🔙 原版最佳模型评估策略：以 val_loss 为唯一标准（Loss 越低越好）
+        🚀 平均排名策略：综合考虑 Loss, Dice, HD95, IoU 决定最佳模型
         """
-        # 获取当前 epoch 的验证集 loss
-        val_loss = val_log.get('val_loss', np.inf)
+        # 1. 累积当前 epoch 的所有验证指标
+        current_metrics = {'epoch': current_epoch, **val_log}
+        self.metric_history.append(current_metrics)
 
-        # 判断是否比历史最好记录更低
-        is_best = val_loss < self.mnt_best
+        # 2. 转换为 DataFrame 方便批量计算排名
+        history_df = pd.DataFrame(self.metric_history)
 
-        if is_best:
-            # 更新记录
-            self.mnt_best = val_loss
-            self.best_epoch_info = {'epoch': current_epoch, **val_log}
+        rank_cols = []
+
+        # Loss 和 HD95：数值越小越好 (ascending=True)
+        if 'val_loss' in history_df.columns:
+            history_df['loss_rank'] = history_df['val_loss'].rank(ascending=True, method='dense')
+            rank_cols.append('loss_rank')
+        if 'val_hd95_batch' in history_df.columns:
+            history_df['hd95_rank'] = history_df['val_hd95_batch'].rank(ascending=True, method='dense')
+            rank_cols.append('hd95_rank')
+
+        # IoU 和 Dice：数值越大越好 (ascending=False)
+        if 'val_iou_score' in history_df.columns:
+            history_df['iou_rank'] = history_df['val_iou_score'].rank(ascending=False, method='dense')
+            rank_cols.append('iou_rank')
+        if 'val_dice_score' in history_df.columns:
+            history_df['dice_rank'] = history_df['val_dice_score'].rank(ascending=False, method='dense')
+            rank_cols.append('dice_rank')
+
+        # 如果没有任何排名列被生成（防呆机制），默认当前就是最佳
+        if not rank_cols:
+            self.best_epoch_info = current_metrics
+            return True
+
+        # 3. 计算所有可用指标排名的平均值
+        history_df['avg_rank'] = history_df[rank_cols].mean(axis=1)
+
+        # 4. 找到平均排名数值最小（排名最靠前）的那一行
+        best_epoch_idx = history_df['avg_rank'].idxmin()
+        self.best_epoch_info = history_df.loc[best_epoch_idx].to_dict()
+
+        # 5. 判断“历史最佳”是否就是“当前 Epoch”
+        if self.best_epoch_info['epoch'] == current_epoch:
             return True
 
         return False
@@ -123,9 +164,10 @@ class Trainer:
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
 
+            # 🚀 修改点 3：Loss 计算与输出提取三分支
             if isinstance(outputs, dict) and "pred" in outputs:
                 loss = self.criterion(outputs, targets)
-                outputs = outputs["pred"]
+                outputs = outputs["pred"] # 提取出概率图用于后续评估
 
             elif isinstance(outputs, tuple) and len(outputs) == 2:
                 out_main, out_aux = outputs
@@ -150,17 +192,16 @@ class Trainer:
             with torch.no_grad():
                 outputs_detached = outputs.detach()
 
-                # 🚀 动态判断：防止 Double Sigmoid，同时拯救 CNN
-                if outputs_detached.max() > 1.0 or outputs_detached.min() < 0.0:
-                    pred_probs = torch.sigmoid(outputs_detached)
-                else:
+                # 🚀 修改点 4：配置驱动的概率校准，彻底解决数值盲猜的 Bug
+                if self.output_is_prob:
                     pred_probs = outputs_detached
+                else:
+                    pred_probs = torch.sigmoid(outputs_detached)
 
-                # 🚀 用经过概率校准的值计算 IoU
+                # 计算 IoU
                 batch_iou = iou_score(pred_probs, targets)
 
                 if batch_iou is not None:
-                    # ============ 🚀 健壮的指标解析逻辑 ============
                     if isinstance(batch_iou, tuple) and len(batch_iou) == 2:
                         iou_sum, iou_count = batch_iou
                         batch_iou = iou_sum / iou_count if iou_count > 0 else 0.0
@@ -170,9 +211,7 @@ class Trainer:
                         batch_iou = float(np.mean(batch_iou))
                     else:
                         batch_iou = float(batch_iou)
-                    # ===============================================
 
-                    # 🚀 补全权重参数 n
                     self.train_metrics.update('iou_score', batch_iou, n=targets.size(0))
 
             pbar.set_postfix(**{k: f"{v:.4f}" for k, v in self.train_metrics.result().items()})
@@ -195,6 +234,7 @@ class Trainer:
 
                 outputs = self.model(inputs)
 
+                # 🚀 修改点 5：验证集 Loss 计算与输出提取三分支
                 if isinstance(outputs, dict) and "pred" in outputs:
                     loss = self.criterion(outputs, targets)
                     outputs = outputs["pred"]
@@ -205,21 +245,18 @@ class Trainer:
                 else:
                     loss = self.criterion(outputs, targets)
 
-                # 🚀 补全验证 loss 的权重参数 n
                 self.valid_metrics.update('loss', loss.item(), n=targets.size(0))
 
-                # 🚀 动态判断：防止 Double Sigmoid，同时拯救 CNN
-                if outputs.max() > 1.0 or outputs.min() < 0.0:
-                    pred_probs = torch.sigmoid(outputs)
-                else:
+                # 🚀 修改点 6：验证集配置驱动的概率校准
+                if self.output_is_prob:
                     pred_probs = outputs
+                else:
+                    pred_probs = torch.sigmoid(outputs)
 
                 for met in self.metric_fns:
-                    # 🚀 用经过概率校准的值计算指标
                     metric_value = met(pred_probs, targets)
 
                     if metric_value is not None:
-                        # ====== 智能解析不同指标返回格式 ======
                         if isinstance(metric_value, tuple) and len(metric_value) == 2:
                             v_sum, v_count = metric_value
                             metric_value = v_sum / v_count if v_count > 0 else 0.0
@@ -229,10 +266,8 @@ class Trainer:
                             metric_value = float(np.mean(metric_value))
                         else:
                             metric_value = float(metric_value)
-                        # ====================================
 
                         if not np.isnan(metric_value):
-                            # 🚀 补全所有指标的权重参数 n
                             self.valid_metrics.update(met.__name__, metric_value, n=targets.size(0))
 
         return {f'val_{k}': v for k, v in self.valid_metrics.result().items()}
