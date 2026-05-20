@@ -1,0 +1,57 @@
+#安装环境 本身的环境有点问题，修改了一下environment文件，但是后面改的代码可能没有记录，基本环境这么安装，后面有些包再补充
+conda env create -f environment.yml
+conda activate awesome
+pip install torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cu128
+
+#运行命令 log名字自由更换
+nohup bash run_cnn.sh > train_busi_unet.log 2>&1 &
+nohup bash run_vit.sh > train_busi_transunet.log 2>&1 &
+nohup bash run_usfm_official_segvit.sh > train_usfm_official_segvit.log 2>&1 &
+
+#数据集放置说明：下载BUSI后，放在datasets/BreastUS/BUSI路径下，原始的busi文件叫Daraset_BUSI_with_GT,改名BUSI放在相应路径下就行。压缩包里路径不太对需要改一下。有一个数据处理文件叫offline_preprocess是我自己本身想处理自己的数据的文件，暂时不用管。
+
+#数据集预处理（单个数据集可以后面单个加，只有busi的话就直接后面只写busi就行）
+python -c "from data.prepare_datasets import PrepareDataset; PrepareDataset().run(['busi','busbra','bus_uc','bus_uclm','yap'])"
+
+
+#预训练权重路径
+"./pretrained_models/jepa_BUS-ep300.pth.tar"
+"./pretrained_models/USFM_latest.pth"
+
+
+#操作说明
+如果要修改vit架构本身的信息，前往src/models/ViT_based/jepa_upernet/configs修改对应的yaml文件即可
+config.json需要注意的参数
+"checkpoint_dir"：因为脚本写的是会先去"checkpoint_dir"下面找有没有五折的权重，如果有则跳过训练直接test,因此要重复跑实验的话需要修改"checkpoint_dir"，前往config.json中修改
+"freeze_mode": "none"是不冻结encoder/backbone,"encoder"是冻结encoder/backbone
+"use_pad": false是采用直接resize到224，true是按照长宽比resize到224，jepa预训练是直接resize因此推荐false
+ "force_prepare": true是会再重新运行数据预处理划分五折验证csv文件，false则是按照现有的csv文件运行，同一个环境下建议是false，首次运行可以是true.不过直接上面运行数据集预处理脚本就能直接划分csv，一直开着false就行。
+
+"jepa_args": {
+    "cfg": "./src/models/ViT_based/jepa_upernet/configs/jepa_vits16_224.yaml",
+    "PRETRAIN_CKPT": "./pretrained_models/jepa_BUS-ep300.pth.tar"
+  },
+
+  "usfm_args": {
+    "cfg": "./src/models/ViT_based/jepa_upernet/configs/usfm_vitb16_224.yaml",
+    "PRETRAIN_CKPT": "./pretrained_models/USFM_latest.pth"
+  }
+}上面是两个模型的相关配置，如果不需要ckpt权重，改为null就行。
+
+当 decoder_type 为 "SegViT" 时 必须搭配 "ATMLoss"。
+
+当 decoder_type 为 "UPerHead" 时 必须搭配 "DiceBCELoss"（或其他标准的 CNN 损失函数）。
+  "loss": {
+    "type": "DiceBCELoss",
+    "args": {}
+
+  "loss": {
+    "type": "ATMLoss",
+    "args": {
+      "num_classes": 1,
+      "dec_layers": 3,
+      "mask_weight": 20.0,
+      "dice_weight": 1.0,
+      "cls_weight": 1.0
+    }
+  },
