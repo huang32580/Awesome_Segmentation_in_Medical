@@ -47,7 +47,8 @@ class USFM(nn.Module):
 
         self.patch_size = self.usfm_args.get('patch_size', 16)
         self.embed_dim = self.usfm_args.get('embed_dim', 768)
-        self.out_indices = self.usfm_args.get('out_indices', [3, 5, 7, 11])
+        default_out_indices = [5, 7, 11] if self.decoder_type == 'SegViT' else [3, 5, 7, 11]
+        self.out_indices = self.usfm_args.get('out_indices', default_out_indices)
         self.img_size = config.get('data', {}).get('target_size', 224)
 
         depth = self.usfm_args.get('depth', 12)
@@ -92,15 +93,27 @@ class USFM(nn.Module):
                 pool_scales=self.pool_scales,
                 num_classes=num_classes
             )
-            if self.mode == 'official':
+            if self.mode in ['official', 'local_aux']:
                 self.aux_head = FCNHead(self.embed_dim, 256, num_classes)
 
         elif self.decoder_type == 'SegViT':
             print(f"🚀 [USFM] 已选择 SegViT 解码器 (Mode: {self.mode})")
+            segvit_embed_dims = self.usfm_args.get('segvit_embed_dims', 384)
+            segvit_num_heads = self.usfm_args.get('segvit_num_heads', 12)
+            segvit_num_layers = self.usfm_args.get('segvit_num_layers', 3)
+            segvit_use_stages = self.usfm_args.get('segvit_use_stages', 3)
+            print(
+                f"   [SegViT Config] out_indices={self.out_indices}, "
+                f"embed_dims={segvit_embed_dims}, num_heads={segvit_num_heads}, "
+                f"num_layers={segvit_num_layers}, use_stages={segvit_use_stages}"
+            )
             self.decode_head = ATMHead(
                 img_size=self.img_size,
-                in_channels=[self.embed_dim] * 4,
-                embed_dims=self.embed_dim,
+                in_channels=self.embed_dim,
+                embed_dims=segvit_embed_dims,
+                num_layers=segvit_num_layers,
+                num_heads=segvit_num_heads,
+                use_stages=segvit_use_stages,
                 num_classes=num_classes,
             )
         else:
@@ -123,7 +136,17 @@ class USFM(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def load_from(self):
+        self.pretrain_debug = {
+            'path': None,
+            'loaded': False,
+            'matched': 0,
+            'missing': None,
+            'unexpected': None,
+            'shape_mismatch': 0,
+            'shape_mismatch_examples': [],
+        }
         pretrained_path = self.usfm_args.get('PRETRAIN_CKPT', None)
+        self.pretrain_debug['path'] = pretrained_path
         if not pretrained_path or str(pretrained_path).lower() == 'none':
             print("WARNING: No USFM pretrain checkpoint.")
             return
@@ -164,12 +187,35 @@ class USFM(nn.Module):
             clean_k = k.replace('module.', '').replace('encoder.', '').replace('backbone.', '')
             new_state_dict[clean_k] = v
 
-        msg = self.backbone.load_state_dict(new_state_dict, strict=False)
+        model_state = self.backbone.state_dict()
+        compatible_state_dict = {}
+        shape_mismatch = []
+        unexpected_keys = []
+        for k, v in new_state_dict.items():
+            if k in model_state and model_state[k].shape == v.shape:
+                compatible_state_dict[k] = v
+            elif k in model_state:
+                shape_mismatch.append((k, list(v.shape), list(model_state[k].shape)))
+            else:
+                unexpected_keys.append(k)
+
+        msg = self.backbone.load_state_dict(compatible_state_dict, strict=False)
+        self.pretrain_debug.update({
+            'loaded': len(compatible_state_dict) > 0,
+            'matched': len(compatible_state_dict),
+            'missing': len(msg.missing_keys),
+            'unexpected': len(unexpected_keys),
+            'shape_mismatch': len(shape_mismatch),
+            'shape_mismatch_examples': shape_mismatch[:5],
+        })
 
         print("\n--- [最终加载统计] ---")
-        print(f"成功匹配并加载的条目数: {len(new_state_dict) - len(msg.unexpected_keys)}")
+        print(f"成功匹配并加载的条目数: {len(compatible_state_dict)}")
         print(f"模型中未找到权重的层 (Missing): {len(msg.missing_keys)}")
-        print(f"权重文件中多余的层 (Unexpected): {len(msg.unexpected_keys)}")
+        print(f"权重文件中多余的层 (Unexpected): {len(unexpected_keys)}")
+        print(f"名称匹配但 shape 不匹配的层 (Shape mismatch): {len(shape_mismatch)}")
+        for k, ckpt_shape, model_shape in shape_mismatch[:5]:
+            print(f"Shape mismatch: {k} | ckpt={ckpt_shape} | model={model_shape}")
         print("=" * 100 + "\n")
 
     def forward_features(self, x):

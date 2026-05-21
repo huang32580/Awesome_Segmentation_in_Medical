@@ -19,6 +19,9 @@ import src.models.cnn_based as cnn_models
 import src.models.ViT_based as transformer_models
 
 
+print("12")
+
+
 def main(config):
     """Main function to run the evaluation pipeline."""
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -53,14 +56,16 @@ def main(config):
     print(f"[*] Testing on Held-out Test Set (Model trained on Fold: {fold_str})")
 
     # 获取真正的 test 集，而不是当前 fold 的验证集
-    test_df = df[df['split'] == 'test'].copy()
+    eval_split = 'test'
+    test_df = df[df['split'] == eval_split].copy()
 
     # 防御性编程：万一你的 CSV 没有叫 'test' 的划分，退回使用验证集（避免报错崩溃）
     if len(test_df) == 0:
         print("⚠️ 警告：CSV中未发现 split=='test' 的数据！回退使用当前折的验证集作为测试。")
-        test_df = df[df['split'] == fold_str].copy()
+        eval_split = fold_str
+        test_df = df[df['split'] == eval_split].copy()
 
-    test_loader = BUSDataLoader(test_df, **loader_args, split='test', is_test=True)
+    test_loader = BUSDataLoader(df, **loader_args, split=eval_split, is_test=True)
 
     # Initialize Model
     model_type = config['arch']['type']

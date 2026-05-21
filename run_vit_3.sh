@@ -66,7 +66,10 @@ elif 'usfm_args' in config:
     # 如果是非 USFM 模型 (如 TransUnet)，彻底关闭模式
     config['usfm_args']['mode'] = 'none'
 
-config['freeze_mode'] = 'encoder' if strategy == 'freeze_encoder' else 'none'
+if 'trainer' not in config:
+    config['trainer'] = {}
+config['trainer']['freeze_mode'] = 'encoder' if strategy == 'freeze_encoder' else 'none'
+config.pop('freeze_mode', None)
 
 with open(config_file, 'w', encoding='utf-8') as f:
     json.dump(config, f, indent=2, ensure_ascii=False)
