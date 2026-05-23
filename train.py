@@ -81,11 +81,27 @@ def build_official_usfm_optimizer(model, usfm_args):
 
         group_name = f"layer_{layer_id}_wd_{wd}"
         if group_name not in param_groups:
-            param_groups[group_name] = {"params": [], "lr": lr * scale, "weight_decay": wd, "name": group_name}
+            param_groups[group_name] = {
+                "params": [],
+                "lr": lr * scale,
+                "initial_lr": lr * scale,
+                "weight_decay": wd,
+                "name": group_name,
+                "layer_id": layer_id,
+                "lr_scale": scale,
+            }
         param_groups[group_name]["params"].append(param)
 
     print(f"✨ [Official Tricks] 构建官方 AdamW! Base_LR={lr}, WD={weight_decay}, Decay={layer_decay}")
-    return torch.optim.AdamW(list(param_groups.values()), eps=1e-8, betas=(0.9, 0.999))
+    groups = list(param_groups.values())
+    group_lrs = [group["lr"] for group in groups]
+    group_scales = [group["lr_scale"] for group in groups]
+    print(
+        f"[DEBUG] LLRD groups before scheduler: groups={len(groups)}, "
+        f"lr_min={min(group_lrs):.8g}, lr_max={max(group_lrs):.8g}, "
+        f"scale_min={min(group_scales):.8g}, scale_max={max(group_scales):.8g}"
+    )
+    return torch.optim.AdamW(groups, eps=1e-8, betas=(0.9, 0.999))
 
 
 def build_official_usfm_scheduler(optimizer, epochs, usfm_args):
@@ -107,13 +123,22 @@ def count_params(module):
 
 def summarize_optimizer(optimizer):
     group_lrs = [group.get('lr', 0.0) for group in optimizer.param_groups]
+    group_initial_lrs = [group.get('initial_lr', group.get('lr', 0.0)) for group in optimizer.param_groups]
     group_wds = [group.get('weight_decay', 0.0) for group in optimizer.param_groups]
     group_params = [sum(p.numel() for p in group.get('params', [])) for group in optimizer.param_groups]
+    group_lr_scales = [group.get('lr_scale') for group in optimizer.param_groups if group.get('lr_scale') is not None]
+    group_layer_ids = [group.get('layer_id') for group in optimizer.param_groups if group.get('layer_id') is not None]
     return {
         'groups': len(optimizer.param_groups),
         'lr_min': min(group_lrs) if group_lrs else None,
         'lr_max': max(group_lrs) if group_lrs else None,
+        'initial_lr_min': min(group_initial_lrs) if group_initial_lrs else None,
+        'initial_lr_max': max(group_initial_lrs) if group_initial_lrs else None,
         'weight_decays': sorted(set(group_wds)),
+        'lr_scale_min': min(group_lr_scales) if group_lr_scales else None,
+        'lr_scale_max': max(group_lr_scales) if group_lr_scales else None,
+        'layer_id_min': min(group_layer_ids) if group_layer_ids else None,
+        'layer_id_max': max(group_layer_ids) if group_layer_ids else None,
         'group_param_min': min(group_params) if group_params else 0,
         'group_param_max': max(group_params) if group_params else 0,
     }
@@ -159,6 +184,12 @@ def print_training_debug(model, model_type, usfm_args, freeze_mode, optimizer, l
     print(f"[DEBUG] optimizer_groups={opt_summary['groups']}")
     print(f"[DEBUG] optimizer_lr_min={opt_summary['lr_min']}")
     print(f"[DEBUG] optimizer_lr_max={opt_summary['lr_max']}")
+    print(f"[DEBUG] optimizer_initial_lr_min={opt_summary['initial_lr_min']}")
+    print(f"[DEBUG] optimizer_initial_lr_max={opt_summary['initial_lr_max']}")
+    print(f"[DEBUG] optimizer_lr_scale_min={opt_summary['lr_scale_min']}")
+    print(f"[DEBUG] optimizer_lr_scale_max={opt_summary['lr_scale_max']}")
+    print(f"[DEBUG] optimizer_layer_id_min={opt_summary['layer_id_min']}")
+    print(f"[DEBUG] optimizer_layer_id_max={opt_summary['layer_id_max']}")
     print(f"[DEBUG] optimizer_weight_decays={opt_summary['weight_decays']}")
     print(f"[DEBUG] optimizer_group_param_min={opt_summary['group_param_min']:,}")
     print(f"[DEBUG] optimizer_group_param_max={opt_summary['group_param_max']:,}")
@@ -254,7 +285,10 @@ def main(config):
             optimizer = config.init_obj('optimizer', torch.optim, trainable_params)
             lr_scheduler = config.init_obj('lr_scheduler', torch.optim.lr_scheduler, optimizer)
 
-            trainer_run_config['usfm_aux_weight'] = 0.0
+            if model_type == 'USFM' and usfm_args.get('mode') == 'local_aux':
+                trainer_run_config['usfm_aux_weight'] = usfm_args.get('aux_weight', 0.4)
+            else:
+                trainer_run_config['usfm_aux_weight'] = 0.0
             trainer_run_config['is_timm_scheduler'] = False
 
         criterion = config.init_obj('loss', loss_module)

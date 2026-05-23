@@ -176,16 +176,16 @@ def main(config):
         else:
             final_results[key] = 0.0
 
-    # Calculate FLOPs and Parameters safely
-    flops, params = 0, 0
+    # Calculate FLOPs safely. Count parameters manually because thop can under-count
+    # custom Transformer/dict-output modules.
+    flops = 0
+    params = sum(p.numel() for p in model.parameters())
     try:
         dummy_input = torch.randn(1, 1 if data_config.get('in_channels', 1) == 1 else 3,
                                   data_config['target_size'], data_config['target_size']).to(device)
-        flops, params = profile(model, inputs=(dummy_input,), verbose=False)
+        flops, _ = profile(model, inputs=(dummy_input,), verbose=False)
     except Exception as e:
         print(f"\n[Warning] thop profile failed to calculate FLOPs: {e}")
-        # params can still be calculated manually
-        params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     # Print Final Results
     print("\n--- Test Results ---")
