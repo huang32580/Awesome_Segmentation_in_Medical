@@ -16,8 +16,11 @@
     "num_workers": 8,
     "use_pad": false
   },
-
-  "//_说明_1": "【常规模式优化器】当 mode 为 local 或 local_aux 时，代码会启用下面这两个节点",
+  "script_defaults": {
+    "local_target_size": 224,
+    "official_target_size": 512,
+    "note": "run_vit_4.sh uses this file as a template and overwrites name, arch.type, data.target_size, loss, trainer.checkpoint_dir, trainer.freeze_mode, and usfm_args per experiment."
+  },
   "optimizer": {
     "type": "AdamW",
     "args": {
@@ -32,8 +35,6 @@
       "eta_min": 1e-5
     }
   },
-
-  "//_说明_2": "【损失函数切换】SegViT 必须配 ATMLoss；UPerHead 必须配 DiceBCELoss",
   "loss": {
     "type": "ATMLoss",
     "args": {
@@ -44,9 +45,11 @@
       "cls_weight": 1.0
     }
   },
-
   "metrics": [
-    "pixel_accuracy", "dice_score", "hd95_batch", "iou_score"
+    "pixel_accuracy",
+    "dice_score",
+    "hd95_batch",
+    "iou_score"
   ],
   "trainer": {
     "epochs": 800,
@@ -62,15 +65,11 @@
   "system": {
     "seed": 42
   },
-
   "usfm_args": {
-    "//_核心开关": "修改下面这两个参数来决定模型架构和运行模式",
     "decoder_type": "SegViT",
     "mode": "official",
     "PRETRAIN_CKPT": "./pretrained_models/USFM_latest.pth",
     "drop_path_rate": 0.1,
-
-    "//_说明_3": "【官方模式超参数】当 mode 为 official 时，train.py 会自动启用以下参数来构建带 Warmup 的 LLRD 优化器",
     "base_lr": 3e-4,
     "warmup_lr": 5e-5,
     "min_lr": 0.0,
@@ -78,8 +77,6 @@
     "layer_decay": 0.65,
     "warmup_epochs": 20,
     "aux_weight": 0.4,
-
-    "//_结构参数": "Backbone 基础参数，通常保持默认",
     "embed_dim": 768,
     "depth": 12,
     "num_heads": 12,

@@ -14,6 +14,7 @@ except ImportError:
 
 __all__ = ['DiceBCELoss', 'LovaszHingeLoss']
 
+
 class LovaszHingeLoss(nn.Module):
     def __init__(self):
         super().__init__()
@@ -24,10 +25,10 @@ class LovaszHingeLoss(nn.Module):
         loss = lovasz_hinge(input, target, per_image=True)
 
         return loss
-    
+
 
 class FocalLoss(nn.Module):
-    
+
     def __init__(self, alpha=0.8, gamma=2):
         super().__init__()
         self.alpha = alpha
@@ -36,8 +37,9 @@ class FocalLoss(nn.Module):
     def forward(self, inputs, targets):
         BCE = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
         pt = torch.exp(-BCE)
-        F_loss = self.alpha * (1-pt)**self.gamma * BCE
+        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE
         return F_loss.mean()
+
 
 class WeightedCrossEntropyLoss(nn.Module):
 
@@ -49,6 +51,7 @@ class WeightedCrossEntropyLoss(nn.Module):
         # loss를 device로 이동
         self.loss.pos_weight = self.loss.pos_weight.to(inputs.device)
         return self.loss(inputs, targets)
+
 
 class EdgeLoss(nn.Module):
 
@@ -62,16 +65,17 @@ class EdgeLoss(nn.Module):
         target_edge = self.sobel(targets)
         return F.l1_loss(pred_edge, target_edge)
 
-def compute_sdf(mask):
 
+def compute_sdf(mask):
     mask = mask.cpu().numpy()
     sdf = np.zeros_like(mask, dtype=np.float32)
     for b in range(mask.shape[0]):
-        posmask = mask[b,0].astype(bool)
-        if posmask.any(): # 마스크가 비어있지 않을 때만 계산
+        posmask = mask[b, 0].astype(bool)
+        if posmask.any():  # 마스크가 비어있지 않을 때만 계산
             negmask = ~posmask
-            sdf[b,0] = edt(negmask) - edt(posmask)
+            sdf[b, 0] = edt(negmask) - edt(posmask)
     return torch.from_numpy(sdf)
+
 
 class BoundaryLoss(nn.Module):
 
@@ -79,13 +83,13 @@ class BoundaryLoss(nn.Module):
         super().__init__()
 
     def forward(self, pred_logits, gt):
+        pred_sigmoid = torch.sigmoid(pred_logits)
 
-        pred_sigmoid = torch.sigmoid(pred_logits) 
-        
         sdf_gt = compute_sdf(gt).to(gt.device)
         loss = torch.mean((pred_sigmoid - gt) * sdf_gt)
         return loss
-    
+
+
 class DiceBCELoss(nn.Module):
     def __init__(self, weight=0.5, bce_weight=0.5, pos_weight=1.0):
         super().__init__()
@@ -94,7 +98,6 @@ class DiceBCELoss(nn.Module):
         self.bce = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]))
 
     def forward(self, inputs, targets, smooth=1e-7):
-        
         self.bce.pos_weight = self.bce.pos_weight.to(inputs.device)
 
         # BCE loss
@@ -105,7 +108,7 @@ class DiceBCELoss(nn.Module):
         # Flatten a N-D Tensor to 1-D Tensor
         intersection = (inputs_sig.flatten() * targets.flatten()).sum()
         dice_loss = 1 - (2. * intersection + smooth) / (inputs_sig.flatten().sum() + targets.flatten().sum() + smooth)
-        
+
         return self.bce_weight * bce_loss + self.weight * dice_loss
 
 
@@ -128,10 +131,10 @@ class ComboLossHD(nn.Module):
         ce_loss = self.ce(inputs, targets)
 
         total_loss = (
-            focal_loss
-            + self.edge_weight * edge_loss
-            + self.boundary_weight * boundary_loss
-            + self.ce_weight * ce_loss
+                focal_loss
+                + self.edge_weight * edge_loss
+                + self.boundary_weight * boundary_loss
+                + self.ce_weight * ce_loss
         )
         return total_loss
 
@@ -291,9 +294,10 @@ class SetCriterion(nn.Module):
 
 class ATMLoss(nn.Module):
     def __init__(self, num_classes=1, dec_layers=3, mask_weight=20.0, dice_weight=1.0, cls_weight=1.0, loss_weight=1.0,
-                 ignore_index=255):
+                 ignore_index=255, official_targets=False):
         super().__init__()
         self.ignore_index = ignore_index
+        self.official_targets = official_targets
         weight_dict = {"loss_ce": cls_weight, "loss_mask": mask_weight, "loss_dice": dice_weight}
         aux_weight_dict = {}
         for i in range(dec_layers - 1):
@@ -304,6 +308,22 @@ class ATMLoss(nn.Module):
 
     def prepare_targets(self, targets):
         new_targets = []
+        if self.official_targets:
+            for targets_per_image in targets.long():
+                gt_cls = targets_per_image.unique()
+                gt_cls = gt_cls[gt_cls != self.ignore_index]
+                masks = []
+                for cls in gt_cls:
+                    masks.append(targets_per_image == cls)
+                if len(gt_cls) == 0:
+                    masks.append(targets_per_image == self.ignore_index)
+                    gt_cls = torch.empty(0, dtype=torch.int64, device=targets.device)
+                else:
+                    gt_cls = gt_cls.long().to(targets.device)
+                masks = torch.stack(masks, dim=0).to(targets.device)
+                new_targets.append({"labels": gt_cls, "masks": masks})
+            return new_targets
+
         # 【新增】🚀 强制二值化收束：无论原始前景像素是 1 还是 255，统统归一化为 0(背景) 和 1(病灶)
         targets = (targets > 0).long()
         for targets_per_image in targets:

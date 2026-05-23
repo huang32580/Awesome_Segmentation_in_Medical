@@ -10,9 +10,11 @@ set -e
 DATASETS=("busi")
 STRATEGIES=("fully_tuning" "freeze_encoder")
 
-CONFIG_FILE="config.json"
+CONFIG_FILE="config_all.json"
 NUM_FOLDS=5
 PRETRAIN_PATH="./pretrained_models/USFM_latest.pth"
+LOCAL_TARGET_SIZE=224
+OFFICIAL_TARGET_SIZE=512
 
 RESULTS_DIR="results/vit_true_official_subset"
 CHECKPOINT_ROOT="checkpoints/vit_true_official_subset"
@@ -30,6 +32,8 @@ usfm_mode = sys.argv[5] if sys.argv[5] != "none" else None
 strategy = sys.argv[6]
 pretrain_ckpt = sys.argv[7]
 checkpoint_root = sys.argv[8]
+local_target_size = int(sys.argv[9])
+official_target_size = int(sys.argv[10])
 
 with open(config_file, "r", encoding="utf-8") as f:
     config = json.load(f)
@@ -38,17 +42,22 @@ config["name"] = exp_name
 config["arch"]["type"] = arch_type
 config["trainer"]["checkpoint_dir"] = f"{checkpoint_root}/{exp_name}"
 
+if "data" not in config:
+    config["data"] = {}
+config["data"]["target_size"] = official_target_size if usfm_mode == "official" else local_target_size
+config["data"]["use_pad"] = False
+
 if decoder_type == "SegViT":
-    config["loss"] = {
-        "type": "ATMLoss",
-        "args": {
-            "num_classes": 1,
-            "dec_layers": 3,
-            "mask_weight": 20.0,
-            "dice_weight": 1.0,
-            "cls_weight": 1.0,
-        },
+    loss_args = {
+        "num_classes": 2 if usfm_mode == "official" else 1,
+        "dec_layers": 3,
+        "mask_weight": 20.0,
+        "dice_weight": 1.0,
+        "cls_weight": 1.0,
     }
+    if usfm_mode == "official":
+        loss_args["official_targets"] = True
+    config["loss"] = {"type": "ATMLoss", "args": loss_args}
 else:
     config["loss"] = {"type": "DiceBCELoss", "args": {}}
 
@@ -62,6 +71,10 @@ if arch_type == "USFM":
 
     if usfm_mode == "official":
         config["usfm_args"]["base_lr"] = 3e-4
+        config["usfm_args"]["warmup_lr"] = 5e-5
+        config["usfm_args"]["min_lr"] = 0.0
+        config["usfm_args"]["weight_decay"] = 0.05
+        config["usfm_args"]["warmup_epochs"] = 20
         config["usfm_args"]["drop_path_rate"] = 0.1
         config["usfm_args"]["aux_weight"] = 0.4
     else:
@@ -100,7 +113,9 @@ run_experiment() {
         "${USFM_MODE:-none}" \
         "$STRATEGY" \
         "$PRETRAIN_PATH" \
-        "$CHECKPOINT_ROOT"
+        "$CHECKPOINT_ROOT" \
+        "$LOCAL_TARGET_SIZE" \
+        "$OFFICIAL_TARGET_SIZE"
 
     local CHECKPOINT_BASE_DIR="${CHECKPOINT_ROOT}/${EXP_NAME}"
     local NEED_TRAIN=false

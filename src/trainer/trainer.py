@@ -25,9 +25,10 @@ class Trainer:
         self.arch_type = config.get('arch', {}).get('type', '')
         self.usfm_args = config.get('usfm_args', {})
         self.decoder_type = self.usfm_args.get('decoder_type', '')
+        self.is_usfm_official = self.arch_type == 'USFM' and self.usfm_args.get('mode', 'local') == 'official'
 
         # 逻辑：只有 SegViT (ATMHead) 出来的 "pred" 是概率图，其他 (UPerHead, CNN) 都是 Logits
-        if self.arch_type == 'USFM' and self.decoder_type == 'SegViT':
+        if self.arch_type == 'USFM' and self.decoder_type == 'SegViT' and not self.is_usfm_official:
             self.output_is_prob = True
         else:
             self.output_is_prob = False
@@ -56,6 +57,31 @@ class Trainer:
 
         # 🌟 修复底层验证集空判问题
         self.fixed_val_batch = next(iter(self.val_loader)) if self.val_loader is not None else None
+
+    def _targets_for_loss(self, targets):
+        if self.is_usfm_official:
+            if targets.dim() == 4 and targets.size(1) == 1:
+                targets = targets.squeeze(1)
+            return targets.long()
+        return targets
+
+    def _metric_tensors(self, outputs, targets):
+        if self.is_usfm_official:
+            if outputs.dim() == 4 and outputs.size(1) > 1:
+                pred = outputs.argmax(dim=1, keepdim=True).float()
+            else:
+                pred = (outputs > 0.5).float()
+            if targets.dim() == 3:
+                target = targets.unsqueeze(1)
+            else:
+                target = targets
+            return (pred > 0).float(), (target > 0).float()
+
+        if self.output_is_prob:
+            pred_probs = outputs
+        else:
+            pred_probs = torch.sigmoid(outputs)
+        return pred_probs, targets
 
     def _update_and_check_best(self, val_log, current_epoch):
         """
@@ -160,32 +186,36 @@ class Trainer:
         for batch_idx, data in enumerate(pbar):
             inputs = data['image'].to(self.device)
             targets = data['mask'].to(self.device)
+            loss_targets = self._targets_for_loss(targets)
 
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
 
             # 🚀 修改点 3：Loss 计算与输出提取三分支
             if isinstance(outputs, dict) and "pred" in outputs:
-                loss = self.criterion(outputs, targets)
+                loss = self.criterion(outputs, loss_targets)
                 outputs = outputs["pred"] # 提取出概率图用于后续评估
 
             elif isinstance(outputs, tuple) and len(outputs) == 2:
                 out_main, out_aux = outputs
-                loss_main = self.criterion(out_main, targets)
-                loss_aux = self.criterion(out_aux, targets)
+                loss_main = self.criterion(out_main, loss_targets)
+                loss_aux = self.criterion(out_aux, loss_targets)
                 aux_weight = self.config.get('usfm_aux_weight', 0.4)
                 loss = loss_main + aux_weight * loss_aux
                 outputs = out_main
 
             else:
-                loss = self.criterion(outputs, targets)
+                loss = self.criterion(outputs, loss_targets)
 
             loss.backward()
             self.optimizer.step()
 
             if self.lr_scheduler is not None:
                 if self.config.get('is_timm_scheduler', False):
-                    self.lr_scheduler.step(epoch + batch_idx / len(self.train_loader))
+                    if self.config.get('scheduler_update_per_iter', False):
+                        self.lr_scheduler.step_update((epoch - 1) * len(self.train_loader) + batch_idx)
+                    else:
+                        self.lr_scheduler.step(epoch + batch_idx / len(self.train_loader))
 
             self.train_metrics.update('loss', loss.item(), n=targets.size(0))
 
@@ -193,13 +223,10 @@ class Trainer:
                 outputs_detached = outputs.detach()
 
                 # 🚀 修改点 4：配置驱动的概率校准，彻底解决数值盲猜的 Bug
-                if self.output_is_prob:
-                    pred_probs = outputs_detached
-                else:
-                    pred_probs = torch.sigmoid(outputs_detached)
+                pred_probs, metric_targets = self._metric_tensors(outputs_detached, targets)
 
                 # 计算 IoU
-                batch_iou = iou_score(pred_probs, targets)
+                batch_iou = iou_score(pred_probs, metric_targets)
 
                 if batch_iou is not None:
                     if isinstance(batch_iou, tuple) and len(batch_iou) == 2:
@@ -231,30 +258,28 @@ class Trainer:
             for batch_idx, data in enumerate(tqdm(self.val_loader, desc=desc, leave=False)):
                 inputs = data['image'].to(self.device)
                 targets = data['mask'].to(self.device)
+                loss_targets = self._targets_for_loss(targets)
 
                 outputs = self.model(inputs)
 
                 # 🚀 修改点 5：验证集 Loss 计算与输出提取三分支
                 if isinstance(outputs, dict) and "pred" in outputs:
-                    loss = self.criterion(outputs, targets)
+                    loss = self.criterion(outputs, loss_targets)
                     outputs = outputs["pred"]
                 elif isinstance(outputs, tuple) and len(outputs) == 2:
                     out_main, out_aux = outputs
-                    loss = self.criterion(out_main, targets)
+                    loss = self.criterion(out_main, loss_targets)
                     outputs = out_main
                 else:
-                    loss = self.criterion(outputs, targets)
+                    loss = self.criterion(outputs, loss_targets)
 
                 self.valid_metrics.update('loss', loss.item(), n=targets.size(0))
 
                 # 🚀 修改点 6：验证集配置驱动的概率校准
-                if self.output_is_prob:
-                    pred_probs = outputs
-                else:
-                    pred_probs = torch.sigmoid(outputs)
+                pred_probs, metric_targets = self._metric_tensors(outputs, targets)
 
                 for met in self.metric_fns:
-                    metric_value = met(pred_probs, targets)
+                    metric_value = met(pred_probs, metric_targets)
 
                     if metric_value is not None:
                         if isinstance(metric_value, tuple) and len(metric_value) == 2:
@@ -316,7 +341,10 @@ class Trainer:
 
             # 这里的可视化为了好看，统统过一遍 Sigmoid 也没关系，
             # 即使发生 double sigmoid 也就是亮一点
-            pred_masks = torch.sigmoid(pred_logits)
+            if self.is_usfm_official:
+                pred_masks, gt_masks = self._metric_tensors(pred_logits, gt_masks)
+            else:
+                pred_masks = torch.sigmoid(pred_logits)
 
         images_grid = make_grid(images, normalize=True)
         gt_masks_grid = make_grid(gt_masks, normalize=True)

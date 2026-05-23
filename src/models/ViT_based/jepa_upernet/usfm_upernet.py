@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import os
+import math
 from functools import partial
 
 # 导入你上传的 USFM 版 VisionTransformer
@@ -37,6 +38,7 @@ class USFM(nn.Module):
 
         self.usfm_args = config.get('usfm_args', {})
         self.mode = self.usfm_args.get('mode', 'local')
+        self.is_official = self.mode == 'official'
         self.decoder_type = self.usfm_args.get('decoder_type', None)
         if self.decoder_type is None:
             raise ValueError(
@@ -68,7 +70,8 @@ class USFM(nn.Module):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             num_classes=0,
             use_abs_pos_emb=False,
-            use_shared_rel_pos_bias=True,
+            use_rel_pos_bias=self.is_official,
+            use_shared_rel_pos_bias=not self.is_official,
             init_values=0.1,
             use_mean_pooling=False,
             drop_path_rate=drop_path_rate
@@ -98,6 +101,15 @@ class USFM(nn.Module):
 
         elif self.decoder_type == 'SegViT':
             print(f"🚀 [USFM] 已选择 SegViT 解码器 (Mode: {self.mode})")
+            if self.is_official:
+                self.fpn1 = nn.Sequential(
+                    nn.ConvTranspose2d(self.embed_dim, self.embed_dim, kernel_size=2, stride=2),
+                    nn.SyncBatchNorm(self.embed_dim),
+                    nn.GELU(),
+                    nn.ConvTranspose2d(self.embed_dim, self.embed_dim, kernel_size=2, stride=2),
+                )
+                self.fpn2 = nn.Sequential(nn.ConvTranspose2d(self.embed_dim, self.embed_dim, kernel_size=2, stride=2))
+                self.fpn3 = nn.Identity()
             segvit_embed_dims = self.usfm_args.get('segvit_embed_dims', 384)
             segvit_num_heads = self.usfm_args.get('segvit_num_heads', 12)
             segvit_num_layers = self.usfm_args.get('segvit_num_layers', 3)
@@ -134,6 +146,26 @@ class USFM(nn.Module):
                 nn.init.trunc_normal_(m.weight, std=.02)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
+
+    @staticmethod
+    def _resize_rel_pos_table(table, target_shape):
+        if list(table.shape) == list(target_shape):
+            return table
+        target_len, target_heads = target_shape
+        source_len, source_heads = table.shape
+        if source_heads != target_heads:
+            return table
+        extra_tokens = 3
+        source_grid_len = source_len - extra_tokens
+        target_grid_len = target_len - extra_tokens
+        source_size = int(math.sqrt(source_grid_len))
+        target_size = int(math.sqrt(target_grid_len))
+        if source_size * source_size != source_grid_len or target_size * target_size != target_grid_len:
+            return table
+        rel_grid = table[:-extra_tokens].transpose(0, 1).reshape(1, source_heads, source_size, source_size)
+        rel_grid = F.interpolate(rel_grid, size=(target_size, target_size), mode='bicubic', align_corners=False)
+        rel_grid = rel_grid.reshape(source_heads, target_grid_len).transpose(0, 1)
+        return torch.cat([rel_grid, table[-extra_tokens:]], dim=0)
 
     def load_from(self):
         self.pretrain_debug = {
@@ -188,10 +220,30 @@ class USFM(nn.Module):
             new_state_dict[clean_k] = v
 
         model_state = self.backbone.state_dict()
+        if self.is_official and 'rel_pos_bias.relative_position_bias_table' in new_state_dict:
+            shared_rel_pos = new_state_dict.pop('rel_pos_bias.relative_position_bias_table')
+            for i in range(len(self.backbone.blocks)):
+                target_key = f'blocks.{i}.attn.relative_position_bias_table'
+                if target_key in model_state:
+                    new_state_dict[target_key] = self._resize_rel_pos_table(
+                        shared_rel_pos, model_state[target_key].shape
+                    )
+
+        for k in list(new_state_dict.keys()):
+            if k.endswith('relative_position_index'):
+                new_state_dict.pop(k)
+
         compatible_state_dict = {}
         shape_mismatch = []
         unexpected_keys = []
         for k, v in new_state_dict.items():
+            if (
+                self.is_official
+                and k in model_state
+                and 'relative_position_bias_table' in k
+                and model_state[k].shape != v.shape
+            ):
+                v = self._resize_rel_pos_table(v, model_state[k].shape)
             if k in model_state and model_state[k].shape == v.shape:
                 compatible_state_dict[k] = v
             elif k in model_state:
@@ -249,6 +301,9 @@ class USFM(nn.Module):
         features = self.forward_features(x)
 
         if self.decoder_type == 'SegViT':
+            if self.is_official:
+                ops = [self.fpn1, self.fpn2, self.fpn3]
+                features = tuple(ops[i](features[i]) for i in range(len(features)))
             return self.decode_head(features)  # 直接返回字典，包含 pred, pred_logits, pred_masks 等
 
 

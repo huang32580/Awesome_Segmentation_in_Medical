@@ -19,9 +19,6 @@ import src.models.cnn_based as cnn_models
 import src.models.ViT_based as transformer_models
 
 
-print("12")
-
-
 def main(config):
     """Main function to run the evaluation pipeline."""
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -37,12 +34,19 @@ def main(config):
         else:
             raise FileNotFoundError(f"{csv_path} not found.")
     df = pd.concat(all_dfs, ignore_index=True)
+    model_type = config['arch']['type']
+    usfm_args = config.config.get('usfm_args', {})
+    is_official_usfm = (model_type == 'USFM' and usfm_args.get('mode', 'local') == 'official')
+    decoder_type = usfm_args.get('decoder_type', '')
+    data_pipeline = 'usfm_official' if is_official_usfm else 'awesome'
+    num_classes = 2 if is_official_usfm else 1
 
     loader_args = {
         'batch_size': 1,  # 测试时通常 bs 设为 1
         'num_workers': data_config.get('num_workers', 4),
         'target_size': data_config['target_size'],
-        'use_pad': data_config.get('use_pad', True)
+        'use_pad': data_config.get('use_pad', True),
+        'pipeline': data_pipeline,
     }
 
     # 提取折数以区分不同的测试集，假设模型名字里有 fold 标识
@@ -68,14 +72,13 @@ def main(config):
     test_loader = BUSDataLoader(df, **loader_args, split=eval_split, is_test=True)
 
     # Initialize Model
-    model_type = config['arch']['type']
     if hasattr(cnn_models, model_type):
         model = config.init_obj('arch', cnn_models)
     elif model_type in ["TransUnet", "SwinUnet", "MedT", "JEPA_UPerNet", "USFM"]:
         model = transformer_models.get_transformer_based_model(
             model_name=model_type,
             config=config.config,
-            num_classes=1
+            num_classes=num_classes
         )
     else:
         raise ValueError(f"Model type '{model_type}' not found.")
@@ -83,10 +86,8 @@ def main(config):
     # ==============================================================
     # 🚀 健壮性改进：提前解析配置，决定输出是否已经是概率图
     # ==============================================================
-    usfm_args = config.config.get('usfm_args', {})
-    decoder_type = usfm_args.get('decoder_type', '')
     # 只有 SegViT(ATMHead) 出来的 pred 是 0-1 概率图，其他都是 Logits
-    output_is_prob = (model_type == 'USFM' and decoder_type == 'SegViT')
+    output_is_prob = (model_type == 'USFM' and decoder_type == 'SegViT' and not is_official_usfm)
 
     # Load Checkpoint
     print(f"Loading checkpoint: {resume_path} ...")
@@ -129,7 +130,15 @@ def main(config):
             # ==============================================================
             # 4. 🚀 配置驱动的概率校准，彻底解决数值盲猜的 Bug
             # ==============================================================
-            if output_is_prob:
+            if is_official_usfm:
+                if outputs.dim() == 4 and outputs.size(1) > 1:
+                    outputs = outputs.argmax(dim=1, keepdim=True).float()
+                else:
+                    outputs = (outputs > 0.5).float()
+                if targets.dim() == 3:
+                    targets = targets.unsqueeze(1)
+                targets = (targets > 0).float()
+            elif output_is_prob:
                 # SegViT 的输出已经是 0-1 的概率图，直接使用
                 outputs = outputs
             else:
@@ -181,7 +190,8 @@ def main(config):
     flops = 0
     params = sum(p.numel() for p in model.parameters())
     try:
-        dummy_input = torch.randn(1, 1 if data_config.get('in_channels', 1) == 1 else 3,
+        dummy_channels = 3 if is_official_usfm else 1 if data_config.get('in_channels', 1) == 1 else 3
+        dummy_input = torch.randn(1, dummy_channels,
                                   data_config['target_size'], data_config['target_size']).to(device)
         flops, _ = profile(model, inputs=(dummy_input,), verbose=False)
     except Exception as e:

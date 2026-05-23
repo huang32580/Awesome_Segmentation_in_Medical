@@ -115,6 +115,36 @@ def build_official_usfm_scheduler(optimizer, epochs, usfm_args):
     )
 
 
+def build_official_seg_optimizer(model, usfm_args, batch_size=16, world_size=1):
+    lr = usfm_args.get('base_lr', 1e-4) * batch_size * world_size / 512.0
+    weight_decay = usfm_args.get('weight_decay', 0.05)
+    params = [p for p in model.parameters() if p.requires_grad]
+    print(
+        f"[Official USFM] AdamW for segmentation: scaled_lr={lr:.8g}, "
+        f"base_lr={usfm_args.get('base_lr', 1e-4)}, batch_size={batch_size}, "
+        f"world_size={world_size}, weight_decay={weight_decay}"
+    )
+    return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay, eps=1e-8, betas=(0.9, 0.999))
+
+
+def build_official_seg_scheduler(optimizer, epochs, steps_per_epoch, usfm_args, batch_size=16, world_size=1):
+    warmup_ep = usfm_args.get('warmup_epochs', 20)
+    min_lr = usfm_args.get('min_lr', 0.0) * batch_size * world_size / 512.0
+    warmup_lr = usfm_args.get('warmup_lr', 5e-5) * batch_size * world_size / 512.0
+    print(
+        f"[Official USFM] CosineLRScheduler by iteration: "
+        f"steps={epochs * steps_per_epoch}, warmup_steps={warmup_ep * steps_per_epoch}"
+    )
+    return CosineLRScheduler(
+        optimizer,
+        t_initial=epochs * steps_per_epoch,
+        lr_min=min_lr,
+        warmup_lr_init=warmup_lr,
+        warmup_t=warmup_ep * steps_per_epoch,
+        t_in_epochs=False,
+    )
+
+
 def count_params(module):
     total = sum(p.numel() for p in module.parameters())
     trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
@@ -218,12 +248,18 @@ def main(config):
         # 🌟 修复划分验证集的问题核心：防范 Pandas 将 split 推断为数字，造成验证集切分为空
         df['split'] = df['split'].astype(str).str.strip()
 
+        model_type = config['arch']['type']
+        usfm_args = config.config.get('usfm_args', {})
+        is_official_usfm = (model_type == 'USFM' and usfm_args.get('mode', 'local') == 'official')
+        num_classes = 2 if is_official_usfm else 1
+        data_pipeline = 'usfm_official' if is_official_usfm else 'awesome'
 
         loader_args = {
             'batch_size': data_config['batch_size'],
             'num_workers': data_config['num_workers'],
             'target_size': data_config['target_size'],
-            'use_pad': data_config.get('use_pad', True)
+            'use_pad': data_config.get('use_pad', True),
+            'pipeline': data_pipeline,
         }
 
         train_loader = BUSDataLoader(df, **loader_args, split=str(fold), is_test=False, augment=True)
@@ -231,14 +267,13 @@ def main(config):
         df_val = df[df['split'] == str(fold)].copy()
         val_loader = BUSDataLoader(df_val, **loader_args, split=str(fold), is_test=True)
 
-        model_type = config['arch']['type']
         if hasattr(cnn_models, model_type):
             model = config.init_obj('arch', cnn_models)
         elif model_type in ["TransUnet", "SwinUnet", "MedT", "JEPA_UPerNet", "USFM"]:
             model = transformer_models.get_transformer_based_model(
                 model_name=model_type,
                 config=config.config,
-                num_classes=1
+                num_classes=num_classes
             )
         else:
             raise ValueError(f"Model type '{model_type}' not found.")
@@ -274,11 +309,18 @@ def main(config):
                 f"weight_decay={usfm_args.get('weight_decay', 0.05)}, "
                 f"layer_decay={usfm_args.get('layer_decay', 0.65)}"
             )
-            optimizer = build_official_usfm_optimizer(model, usfm_args)
-            lr_scheduler = build_official_usfm_scheduler(optimizer, trainer_run_config['epochs'], usfm_args)
+            world_size = max(1, int(config.config.get('n_gpu', 1)))
+            optimizer = build_official_seg_optimizer(
+                model, usfm_args, batch_size=data_config['batch_size'], world_size=world_size
+            )
+            lr_scheduler = build_official_seg_scheduler(
+                optimizer, trainer_run_config['epochs'], len(train_loader), usfm_args,
+                batch_size=data_config['batch_size'], world_size=world_size
+            )
 
             trainer_run_config['usfm_aux_weight'] = usfm_args.get('aux_weight', 0.4)
             trainer_run_config['is_timm_scheduler'] = True
+            trainer_run_config['scheduler_update_per_iter'] = True
         else:
             print("\n🚀 [状态] 使用 Awesome 原生模式 (标准 Optimizer & Scheduler)...")
             trainable_params = filter(lambda p: p.requires_grad, model.parameters())
@@ -291,7 +333,13 @@ def main(config):
                 trainer_run_config['usfm_aux_weight'] = 0.0
             trainer_run_config['is_timm_scheduler'] = False
 
+        if is_official_usfm and usfm_args.get('decoder_type') == 'SegViT':
+            config.config['loss']['args']['num_classes'] = 2
+            config.config['loss']['args']['official_targets'] = True
+
         criterion = config.init_obj('loss', loss_module)
+        if is_official_usfm and usfm_args.get('decoder_type') == 'UPerHead':
+            criterion = torch.nn.CrossEntropyLoss()
         metrics = [getattr(metric_module, met) for met in config['metrics']]
         print_training_debug(
             model=model,
